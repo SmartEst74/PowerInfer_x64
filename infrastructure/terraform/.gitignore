@@ -1,0 +1,22 @@
+# Terraform ignores
+.terraform/
+.terraform.lock.hcl
+.terraformrc
+.terraform/terraform.tfstate
+*.tfstate
+*.tfstate.*
+*.tfvars
+override.tf
+override.tf.json
+*tfplan
+*tfplan.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,38 @@
+# AWS Configuration
+aws_region = "us-east-1"
+
+# Environment: dev, staging, prod
+environment = "dev"
+
+# S3 URI of the GGUF model file
+# Example: "s3://my-bucket/models/Qwen3-8B-Q4_K_M.gguf"
+model_s3_uri = "s3://your-bucket/models/model.gguf"
+
+# EC2 instance type with GPU
+# dev: g4dn.xlarge (1x T4, 16GB)
+# staging: g5.xlarge (1x A10, 24GB)
+# prod: g5.2xlarge or g6.xlarge
+instance_type = "g4dn.xlarge"
+
+# Auto Scaling settings
+min_instances = 1
+max_instances = 5
+desired_capacity = 1
+
+# Load Balancer
+enable_alb = true
+allowed_cidr_blocks = ["0.0.0.0/0"]  # Restrict in production!
+health_check_path = "/health"
+
+# SSH access (for debugging)
+# Leave empty to disable SSH
+key_pair_name = ""
+
+# Monitoring
+enable_monitoring = true
+
+# Additional tags
+tags = {
+  Project = "PowerInfer_x64"
+  Owner = "your-team"
+}

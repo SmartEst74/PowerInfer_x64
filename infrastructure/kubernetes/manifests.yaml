@@ -1,0 +1,217 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: powerinfer
+  labels:
+    name: powerinfer
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: powerinfer-config
+  namespace: powerinfer
+data:
+  POWERINFER_PORT: "8080"
+  POWERINFER_CONCURRENCY: "4"
+  POWERINFER_LOG_LEVEL: "info"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: powerinfer-secrets
+  namespace: powerinfer
+type: Opaque
+stringData:
+  # Optional: if model requires authentication
+  # HF_TOKEN: ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: powerinfer
+  namespace: powerinfer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: powerinfer
+  template:
+    metadata:
+      labels:
+        app: powerinfer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: powerinfer
+        image: powerinfer:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+        envFrom:
+        - configMapRef:
+            name: powerinfer-config
+        - secretRef:
+            name: powerinfer-secrets
+        env:
+        - name: POWERINFER_MODEL_PATH
+          value: "/models/model.gguf"
+        - name: POWERINFER_HOT_INDEX
+          value: "/models/model.hot_index.bin"
+        resources:
+          limits:
+            nvidia.com/gpu: 1  # Request 1 GPU
+            memory: "6Gi"
+            cpu: "4"
+          requests:
+            nvidia.com/gpu: 1
+            memory: "4Gi"
+            cpu: "2"
+        volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+        - name: cache
+          mountPath: /root/.cache/powerinfer
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: powerinfer-models-pvc
+      - name: cache
+        emptyDir: {}
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      nodeSelector:
+        accelerator: nvidia-tesla  # Or match your GPU type
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: powerinfer-service
+  namespace: powerinfer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: LoadBalancer
+  selector:
+    app: powerinfer
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+    protocol: TCP
+  sessionAffinity: None
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: powerinfer-models-pvc
+  namespace: powerinfer
+spec:
+  accessModes:
+    - ReadWriteMany  # Or ReadWriteOnce if using EBS
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: gp3  # AWS EBS GP3
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: powerinfer-hpa
+  namespace: powerinfer
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: powerinfer
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 60
+---
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata:
+  name: powerinfer-pdb
+  namespace: powerinfer
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: powerinfer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: powerinfer-sa
+  namespace: powerinfer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: powerinfer-role
+  namespace: powerinfer
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets", "pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: powerinfer-rolebinding
+  namespace: powerinfer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: powerinfer-role
+subjects:
+- kind: ServiceAccount
+  name: powerinfer-sa
+  namespace: powerinfer
