@@ -1,0 +1,22 @@
+# Default owners for everything
+* @SmartEst74
+
+# Infrastructure and SRE
+/infrastructure/ @SmartEst74
+/deployments/ @SmartEst74
+/.github/ @SmartEst74
+
+# Core engine
+/src/ @SmartEst74
+
+# GPU kernels
+/kernels/ @SmartEst74
+
+# Build system
+/build.rs @SmartEst74
+/Cargo.toml @SmartEst74
+
+# Documentation
+/docs/ @SmartEst74
+README.md @SmartEst74
+PLAN.md @SmartEst74
