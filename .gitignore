@@ -1,0 +1,46 @@
+# General
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+
+# Build artifacts
+*.ptx
+*.spv
+embedded_kernels.rs
+
+# Models (large files not in git)
+models/
+*.gguf
+*.safetensors
+*.bin
+*.hot_index
+
+# Profiling data
+profiler/
+*.jsonl
+*.json
+
+# Docker
+.docker/
+
+# Logs
+*.log
+
+# Testing
+test_data/
+
+# IDE
+.vim/
+
+# Temporary files
+tmp/
+temp/

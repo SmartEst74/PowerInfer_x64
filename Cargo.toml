@@ -1,0 +1,102 @@
+[package]
+name = "powerinfer"
+version = "0.1.0"
+edition = "2021"
+authors = ["PowerInfer_x64 Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/SmartEst74/PowerInfer_x64"
+description = "Neuron-level sparse LLM inference engine in pure Rust"
+keywords = ["llm", "inference", "rust", "gpu", "sparse"]
+categories = ["science", "ai", "hardware"]
+
+[dependencies]
+# GGUF parsing
+gguf-rs = "0.1"
+
+# Numeric types
+half = "2.4"
+byteorder = "1.5"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# HTTP server (optional)
+axum = { version = "0.7", optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Parallelism
+rayon = { version = "1.8", optional = true }
+
+# Linear algebra (predictor training)
+ndarray = { version = "0.16", optional = true }
+
+# Utilities
+clap = { version = "4.5", features = ["derive"] }
+comfy-table = "7.1"
+memmap2 = { version = "0.9", optional = true }
+bytemuck = "1.14"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }  # For timestamps
+num_cpus = "1.16"  # For default thread count
+regex = "1.10"
+
+# GPU backends (optional)
+cust = { version = "0.3", optional = true }
+ash = { version = "0.38", optional = true }
+
+[build-dependencies]
+rust-gpu = { git = "https://github.com/rust-gpu/rust-gpu", optional = true, default-features = false }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[features]
+default = ["cpu"]
+cpu = []
+cuda = ["dep:cust", "kernel/cuda"]
+vulkan = ["dep:ash", "kernel/vulkan"]
+server = ["dep:axum", "dep:tower-http", "tokio/rt-multi-thread"]
+profiling = ["rayon", "memmap2"]
+predictor = ["ndarray"]
+all = ["cpu", "cuda", "vulkan", "server", "profiling", "predictor"]
+
+[lib]
+name = "powerinfer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "powerinfer-cli"
+path = "src/cli.rs"
+required-features = ["cpu"]
+
+[[bin]]
+name = "powerinfer-profile"
+path = "src/profiler.rs"
+required-features = ["profiling"]
+
+[[bin]]
+name = "powerinfer-serve"
+path = "src/server/mod.rs"
+required-features = ["server"]
+
+[[bench]]
+name = "benchmark"
+harness = false
+path = "benches/benchmark.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+inherits = "release"

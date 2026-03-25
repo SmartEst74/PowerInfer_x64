@@ -1,0 +1,21 @@
+[toolchain]
+channel = "nightly-2025-06-23"
+components = ["rust-src", "rustc-dev", "llvm-tools-preview"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false
+debug-assertions = false
+
+[build]
+incremental = false
