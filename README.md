@@ -135,6 +135,110 @@ cargo build --release --features vulkan
 # Use --backend vulkan flag at runtime
 ```
 
+## 🚀 Production Deployment & SRE
+
+PowerInfer_x64 includes production-ready infrastructure for deploying at scale with full observability and incident response.
+
+### Docker Compose (Full Observability Stack)
+
+Quickly deploy with monitoring, alerting, and dashboards:
+
+```bash
+docker compose -f deployments/docker-compose.yml up -d
+```
+
+This starts:
+- PowerInfer server with metrics endpoint
+- Prometheus (scrapes metrics every 10s)
+- Grafana with pre-built dashboards
+- Alertmanager with incident runbooks
+
+Access:
+- API: http://localhost:8080
+- Metrics: http://localhost:8080/metrics
+- Prometheus: http://localhost:9090
+- Grafana: http://localhost:3000 (admin/admin)
+
+### Cloud Deployment with Terraform
+
+Deploy to AWS (EC2 GPU instances) with Infrastructure as Code:
+
+```bash
+cd infrastructure/terraform
+terraform init
+terraform apply -var="model_s3_uri=s3://my-bucket/models/Qwen3-8B-Q4_K_M.gguf"
+```
+
+Features:
+- Auto-scaling group with GPU instances (g5.xlarge)
+- Application Load Balancer with health checks
+- IAM roles with least privilege (S3 read, SSM)
+- CloudWatch alarms for scaling
+- EBS volumes for model storage
+
+See [infrastructure/terraform/README.md](infrastructure/terraform/README.md) for details.
+
+### SLOs & Monitoring
+
+| Indicator | Target | Measurement |
+|-----------|--------|-------------|
+| Availability | 99.9% | HTTP 2xx/3xx responses |
+| Latency (p50) | <50ms | API response time |
+| Latency (p99) | <500ms | API response time |
+| Throughput | >10 req/s | Successful completions |
+| Error Rate | <0.1% | 5xx responses |
+
+Key metrics exposed on `/metrics` (Prometheus format):
+- `powerinfer_inference_requests_total` - Request counter by status
+- `powerinfer_inference_duration_seconds` - Latency histogram
+- `powerinfer_tokens_generated_total` - Output token counter
+- `powerinfer_gpu_utilization_percent` - GPU compute utilization
+- `powerinfer_memory_usage_bytes` - GPU/CPU memory
+- `powerinfer_queue_depth` - Pending requests
+
+### Alerting
+
+Critical alerts (P0):
+- Service down (no heartbeat 2min)
+- Error rate >1% for 5min
+- Latency p99 >2s for 5min
+- GPU memory >95% for 5min
+
+Warning alerts (P1):
+- Throughput <5 req/s for 15min
+- Low tokens per request (quality degradation)
+- High GPU temperature (>85°C)
+
+Alert routing:
+- Critical → Slack/PagerDuty immediate page
+- Warning → Daily digest email
+- Info → Weekly summary
+
+See [infrastructure/alerting/runbooks/](infrastructure/alerting/runbooks/) for detailed incident response procedures.
+
+### Dashboards
+
+Grafana dashboards included:
+- **Service Overview**: requests, errors, latency, SLOs
+- **Performance**: tokens/sec, GPU utilization, queue depth
+- **Resources**: memory usage, CPU, disk I/O
+- **Quality**: tokens per request, perplexity estimates
+
+Import from `infrastructure/dashboards/powerinfer.json` or use pre-provisioned via Docker Compose.
+
+### Cost Optimization
+
+- Use spot instances (EC2) for non-critical workloads
+- Auto-scale to zero during off-hours (if using K8s)
+- Pack multiple replicas per GPU node (if memory allows)
+- Right-size GPU type based on throughput needs
+- Monitor with Cost Explorer to identify waste
+
+Estimated costs (AWS, us-east-1):
+- **Development**: 1× g4dn.xlarge (~$470/month)
+- **Staging**: 2× g5.xlarge (~$870/month)
+- **Production (auto-scale)**: $1800-4500/month depending on load
+
 ## 🛠️ Development Workflow
 
 ### Project Structure
