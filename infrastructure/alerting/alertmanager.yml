@@ -1,0 +1,89 @@
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'localhost:587'
+  smtp_from: 'alerts@powerinfer.example.com'
+
+route:
+  group_by: ['alertname', 'component', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'null'  # Default to null, override per severity
+
+  routes:
+    # Critical alerts: immediate paging (would integrate with PagerDuty/Opsgenie)
+    - match:
+        severity: critical
+      receiver: 'critical-pager'
+      continue: false
+      group_wait: 10s
+      repeat_interval: 1h
+
+    # Warning alerts: daily digest
+    - match:
+        severity: warning
+      receiver: 'warning-digest'
+      continue: false
+      group_wait: 5m
+      repeat_interval: 24h
+
+    # Info alerts: weekly summary
+    - match:
+        severity: info
+      receiver: 'info-weekly'
+      continue: false
+      group_wait: 30m
+      repeat_interval: 168h  # 1 week
+
+receivers:
+  # Null receiver (discard) for testing
+  - name: 'null'
+    webhook_configs: []
+
+  # Critical pager (Slack + PagerDuty example)
+  - name: 'critical-pager'
+    webhook_configs:
+      - url: 'https://hooks.slack.com/services/your/critical/webhook'
+        send_resolved: true
+    # Additional: pagerduty_configs would go here
+    # - routing_key: "your-pagerduty-key"
+
+  # Warning digest (email to team)
+  - name: 'warning-digest'
+    email_configs:
+      - to: 'team@powerinfer.example.com'
+        from: 'alerts@powerinfer.example.com'
+        smarthost: 'smtp.example.com:587'
+        headers:
+          subject: '[PowerInfer] Warning Digest - {{ .GroupLabels.alertname }}'
+        html: |
+          <h2>Warning Alerts</h2>
+          {{ range .Alerts }}
+          <div style="margin: 10px; padding: 10px; border-left: 4px solid orange;">
+            <strong>{{ .Labels.alertname }}</strong><br>
+            {{ .Annotations.summary }}<br>
+            {{ .Annotations.description }}<br>
+            <em>Started at {{ .StartsAt.Format "2006-01-02 15:04:05" }}</em>
+          </div>
+          {{ end }}
+
+  # Info weekly (just log)
+  - name: 'info-weekly'
+    webhook_configs:
+      - url: 'http://grafana:3000/api/annotations'  # Could create Grafana annotation
+        send_resolved: false
+
+# Inhibition rules: silence some alerts when more severe ones are firing
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'component']
+    # Don't show warnings if critical is firing
+
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'info'
+    equal: ['alertname', 'component']

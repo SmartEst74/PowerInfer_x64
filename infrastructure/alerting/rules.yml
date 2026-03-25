@@ -1,0 +1,108 @@
+groups:
+  - name: powerinfer_alerts
+    rules:
+      # Critical: Service Down
+      - alert: PowerInferDown
+        expr: up{job="powerinfer"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: service
+        annotations:
+          summary: "PowerInfer service is down"
+          description: "PowerInfer endpoint has been unreachable for >2 minutes"
+          runbook_url: "https://github.com/SmartEst74/PowerInfer_x64/blob/main/infrastructure/alerting/runbooks/service-down.md"
+
+      # Critical: High Error Rate
+      - alert: PowerInferHighErrorRate
+        expr: |
+          rate(powerinfer_inference_requests_total{status=~"5.."}[5m]) 
+          / 
+          rate(powerinfer_inference_requests_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "PowerInfer error rate >1%"
+          description: "Error rate is {{ $value | humanizePercentage }} over 5 minutes"
+          runbook_url: "https://github.com/SmartEst74/PowerInfer_x64/blob/main/infrastructure/alerting/runbooks/high-error-rate.md"
+
+      # Critical: High Latency (p99)
+      - alert: PowerInferHighLatency
+        expr: |
+          histogram_quantile(0.99, 
+            rate(powerinfer_inference_duration_seconds_bucket[5m])
+          ) > 2.0
+        for: 5m
+        labels:
+          severity: critical
+          component: performance
+        annotations:
+          summary: "PowerInfer p99 latency >2s"
+          description: "99th percentile latency is {{ $value | humanizeDuration }}"
+          runbook_url: "https://github.com/SmartEst74/PowerInfer_x64/blob/main/infrastructure/alerting/runbooks/high-latency.md"
+
+      # Warning: High Queue Depth
+      - alert: PowerInferHighQueueDepth
+        expr: powerinfer_queue_depth > 100
+        for: 10m
+        labels:
+          severity: warning
+          component: capacity
+        annotations:
+          summary: "PowerInfer queue depth high"
+          description: "Request queue has {{ $value }} pending items"
+          runbook_url: "https://github.com/SmartEst74/PowerInfer_x64/blob/main/infrastructure/alerting/runbooks/high-queue-depth.md"
+
+      # Critical: GPU Out of Memory
+      - alert: PowerInferGPUMemoryCritical
+        expr: powerinfer_gpu_memory_usage_bytes / powerinfer_gpu_memory_total_bytes > 0.95
+        for: 5m
+        labels:
+          severity: critical
+          component: resource
+        annotations:
+          summary: "GPU memory >95%"
+          description: "GPU memory usage is {{ $value | humanizePercentage }}"
+          runbook_url: "https://github.com/SmartEst74/PowerInfer_x64/blob/main/infrastructure/alerting/runbooks/gpu-oom.md"
+
+      # Warning: Low Throughput
+      - alert: PowerInferLowThroughput
+        expr: |
+          rate(powerinfer_inference_requests_total[10m]) < 5
+        for: 15m
+        labels:
+          severity: warning
+          component: capacity
+        annotations:
+          summary: "Throughput <5 req/s"
+          description: "Current throughput is {{ $value }} req/s"
+          runbook_url: "https://github.com/SmartEst74/PowerInfer_x64/blob/main/infrastructure/alerting/runbooks/low-throughput.md"
+
+      # Warning: Model Quality Degradation (token length anomaly)
+      - alert: PowerInferLowTokensPerRequest
+        expr: |
+          avg(rate(powerinfer_tokens_generated_total[1h])) 
+          / 
+          avg(rate(powerinfer_inference_requests_total[1h])) < 20
+        for: 1h
+        labels:
+          severity: warning
+          component: quality
+        annotations:
+          summary: "Average tokens per request unusually low ({{ $value }})"
+          description: "Model may be producing short responses or truncating"
+          runbook_url: "https://github.com/SmartEst74/PowerInfer_x64/blob/main/infrastructure/alerting/runbooks/model-quality.md"
+
+      # Info: High Temperature (Jetson specific)
+      - alert: PowerInferHighTemperature
+        expr: node_hwmon_temp_celsius{label="powerinfer"} > 85
+        for: 10m
+        labels:
+          severity: info
+          component: hardware
+        annotations:
+          summary: "GPU temperature >85°C"
+          description: "Consider thermal throttling; check cooling"
+          runbook_url: "https://github.com/SmartEst74/PowerInfer_x64/blob/main/infrastructure/alerting/runbooks/high-temp.md"
