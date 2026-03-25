@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::gguf::GgufFile;
+use anyhow::anyhow;
 
 /// Simple BPE tokenizer
 pub struct Tokenizer {
@@ -26,7 +27,7 @@ impl Tokenizer {
         // Extract vocabulary from GGUF
         let token_count = gguf.metadata("tokenizer.ggml.token_count")
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| crate::Error::msg("Missing token count"))? as usize;
+            .ok_or_else(|| anyhow!("Missing token count"))? as usize;
         
         // In real implementation, load all token strings from GGUF
         // For now, placeholder
@@ -85,6 +86,11 @@ impl Tokenizer {
     /// Get EOS token ID
     pub fn eos_token_id(&self) -> Option<u32> {
         self.eos_token_id
+    }
+    
+    /// Get vocabulary size
+    pub fn vocab_size(&self) -> usize {
+        self.vocab.len()
     }
 }
 
