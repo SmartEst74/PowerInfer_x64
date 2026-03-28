@@ -32,7 +32,8 @@ pub trait Backend: Send + Sync {
     fn copy_to_device(&self, dst: &Buffer, src: &[u8], offset: usize) -> Result<(), BackendError>;
 
     /// Copy data from device to host
-    fn copy_to_host(&self, src: &Buffer, dst: &mut [u8], offset: usize) -> Result<(), BackendError>;
+    fn copy_to_host(&self, src: &Buffer, dst: &mut [u8], offset: usize)
+        -> Result<(), BackendError>;
 
     /// Launch a kernel
     fn launch_kernel(
@@ -69,29 +70,17 @@ pub enum BackendType {
 }
 
 /// Kernel handle (compiled GPU kernel)
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Kernel {
     pub name: String,
     pub backend_type: BackendType,
-    // backend-specific handle (CUDA: CUfunction, Vulkan: vk::ShaderModule)
-    handle: Box<dyn std::any::Any>,
 }
 
 /// Kernel argument types
 #[derive(Debug)]
 pub enum KernelArg<'a> {
     Buffer(&'a Buffer),
-    Value(u64),  // For integers/scalars; could be extended
-    // Could add f32, f64, etc.
-}
-
-impl<'a> KernelArg<'a> {
-    pub fn as_any(&self) -> &dyn Any {
-        match self {
-            Self::Buffer(b) => b,
-            Self::Value(v) => v,
-        }
-    }
+    Value(u64),
 }
 
 // Helper trait for downcasting backends
@@ -121,12 +110,14 @@ impl BackendFactory {
 
     /// Create CUDA backend (if available)
     pub fn cuda(device_id: usize) -> Result<Box<dyn Backend>, BackendError> {
-        CudaBackend::new(device_id).map(|b| Box::new(b))
+        let b = CudaBackend::new(device_id)?;
+        Ok(Box::new(b))
     }
 
     /// Create Vulkan backend
     pub fn vulkan() -> Result<Box<dyn Backend>, BackendError> {
-        VulkanBackend::new().map(|b| Box::new(b))
+        let b = VulkanBackend::new()?;
+        Ok(Box::new(b))
     }
 }
 
@@ -164,12 +155,22 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn copy_to_device(&self, _dst: &Buffer, _src: &[u8], _offset: usize) -> Result<(), BackendError> {
+    fn copy_to_device(
+        &self,
+        _dst: &Buffer,
+        _src: &[u8],
+        _offset: usize,
+    ) -> Result<(), BackendError> {
         // CPU: just memcpy into allocated buffer
         Ok(())
     }
 
-    fn copy_to_host(&self, _src: &Buffer, _dst: &mut [u8], _offset: usize) -> Result<(), BackendError> {
+    fn copy_to_host(
+        &self,
+        _src: &Buffer,
+        _dst: &mut [u8],
+        _offset: usize,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 
@@ -231,11 +232,21 @@ impl Backend for CudaBackend {
         Ok(())
     }
 
-    fn copy_to_device(&self, _dst: &Buffer, _src: &[u8], _offset: usize) -> Result<(), BackendError> {
+    fn copy_to_device(
+        &self,
+        _dst: &Buffer,
+        _src: &[u8],
+        _offset: usize,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 
-    fn copy_to_host(&self, _src: &Buffer, _dst: &mut [u8], _offset: usize) -> Result<(), BackendError> {
+    fn copy_to_host(
+        &self,
+        _src: &Buffer,
+        _dst: &mut [u8],
+        _offset: usize,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 
@@ -253,7 +264,7 @@ impl Backend for CudaBackend {
         Ok(())
     }
 
-    fn memory_info(&self) -> Result<( usize, usize), BackendError> {
+    fn memory_info(&self) -> Result<(usize, usize), BackendError> {
         // Query GPU memory
         Ok((2 * 1024 * 1024 * 1024, 4 * 1024 * 1024 * 1024)) // 2/4 GB
     }
@@ -289,11 +300,21 @@ impl Backend for VulkanBackend {
         Ok(())
     }
 
-    fn copy_to_device(&self, _dst: &Buffer, _src: &[u8], _offset: usize) -> Result<(), BackendError> {
+    fn copy_to_device(
+        &self,
+        _dst: &Buffer,
+        _src: &[u8],
+        _offset: usize,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 
-    fn copy_to_host(&self, _src: &Buffer, _dst: &mut [u8], _offset: usize) -> Result<(), BackendError> {
+    fn copy_to_host(
+        &self,
+        _src: &Buffer,
+        _dst: &mut [u8],
+        _offset: usize,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 
@@ -311,7 +332,7 @@ impl Backend for VulkanBackend {
         Ok(())
     }
 
-    fn memory_info(&self) -> Result<( usize, usize), BackendError> {
+    fn memory_info(&self) -> Result<(usize, usize), BackendError> {
         Ok((4 * 1024 * 1024 * 1024, 8 * 1024 * 1024 * 1024))
     }
 

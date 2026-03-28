@@ -14,7 +14,7 @@ pub struct LayerConfig {
     pub head_count_kv: Option<usize>,
     pub head_dim: usize,
     pub rope_dim: Option<usize>,
-    pub full_attention_interval: Option<usize>,  // For hybrid DeltaNet
+    pub full_attention_interval: Option<usize>, // For hybrid DeltaNet
 }
 
 /// Complete model configuration
@@ -39,10 +39,7 @@ pub struct InferenceContext {
 
 impl InferenceContext {
     /// Build inference context from GGUF file
-    pub fn from_gguf<P: AsRef<Path>>(
-        gguf_path: P,
-        backend: Box<dyn Backend>,
-    ) -> Result<Self> {
+    pub fn from_gguf<P: AsRef<Path>>(gguf_path: P, backend: Box<dyn Backend>) -> Result<Self> {
         let gguf = GgufFile::open(gguf_path)?;
         let config = gguf.model_config()?;
 
@@ -51,14 +48,11 @@ impl InferenceContext {
         // TODO: Initialize tokenizer
         // TODO: Allocate KV cache
 
-        Ok(Self {
-            config,
-            backend,
-        })
+        Ok(Self { config, backend })
     }
 
     /// Generate text given a prompt
-    pub fn generate(&mut self, prompt: &str, max_tokens: usize) -> Result<String> {
+    pub fn generate(&mut self, prompt: &str, _max_tokens: usize) -> Result<String> {
         // TODO: Tokenize prompt
         // TODO: Prefill: run forward pass on entire prompt
         // TODO: Decoding loop: sample next token, append, repeat

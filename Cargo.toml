@@ -37,6 +37,7 @@ rayon = { version = "1.8", optional = true }
 
 # Linear algebra (predictor training)
 ndarray = { version = "0.16", optional = true }
+rand = { version = "0.8", optional = true }
 
 # Utilities
 clap = { version = "4.5", features = ["derive"] }
@@ -64,7 +65,7 @@ cuda = ["dep:cust"]
 vulkan = ["dep:ash"]
 server = ["dep:axum", "dep:tower-http", "tokio/rt-multi-thread"]
 profiling = ["rayon", "memmap2"]
-predictor = ["ndarray"]
+predictor = ["ndarray", "rand"]
 all = ["cpu", "cuda", "vulkan", "server", "profiling", "predictor"]
 
 [lib]

@@ -3,38 +3,45 @@
 //! Based on the GGUF specification v2/v3.
 //! Uses `gguf-rs` crate for low-level parsing.
 
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
 use anyhow::{anyhow, Result};
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::path::Path;
 
-use gguf_rs::{GgufFile as GgufRsFile, TensorInfo, Value};
+use gguf_rs::{GGMLType, GGUFModel, Tensor};
 
-use crate::quant::{QuantizationType, dequantize_block};
-use crate::model::{ModelConfig, LayerConfig};
+use crate::model::{LayerConfig, ModelConfig};
+use crate::quant::QuantizationType;
 
-/// Higher-level wrapper around `gguf-rs`'s GgufFile
+/// Higher-level wrapper around `gguf-rs`'s GGUFModel
 pub struct GgufFile {
-    inner: GgufRsFile<BufReader<File>>,
+    model: GGUFModel,
     path: std::path::PathBuf,
 }
 
 impl GgufFile {
     /// Open a GGUF file for reading
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(&path)?;
-        let reader = BufReader::new(file);
-        let inner = GgufRsFile::parse(reader)?;
+        let path_str = path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| anyhow!("Invalid path"))?;
+        let mut container = gguf_rs::get_gguf_container(path_str)?;
+        let model = container.decode()?;
         Ok(Self {
-            inner,
+            model,
             path: path.as_ref().to_path_buf(),
         })
     }
 
+    /// Get metadata map
+    fn kv(&self) -> &BTreeMap<String, Value> {
+        self.model.metadata()
+    }
+
     /// Get model architecture name (e.g., "qwen3", "llama")
     pub fn architecture(&self) -> Result<&str> {
-        self.inner
-            .metadata()
+        self.kv()
             .get("general.architecture")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("Architecture not found in GGUF metadata"))
@@ -42,17 +49,19 @@ impl GgufFile {
 
     /// Get model name
     pub fn name(&self) -> Option<&str> {
-        self.inner.metadata().get("general.name").and_then(|v| v.as_str())
+        self.kv().get("general.name").and_then(|v| v.as_str())
     }
 
     /// Get number of model parameters (as string like "7B")
     pub fn parameter_count(&self) -> Option<&str> {
-        self.inner.metadata().get("general.parameter_count").and_then(|v| v.as_str())
+        self.kv()
+            .get("general.parameter_count")
+            .and_then(|v| v.as_str())
     }
 
     /// Get context length
     pub fn context_length(&self) -> Result<usize> {
-        self.inner.metadata()
+        self.kv()
             .get("llama.context_length")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
@@ -61,7 +70,7 @@ impl GgufFile {
 
     /// Get embedding dimension
     pub fn embedding_length(&self) -> Result<usize> {
-        self.inner.metadata()
+        self.kv()
             .get("llama.embedding_length")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
@@ -70,7 +79,7 @@ impl GgufFile {
 
     /// Get number of transformer layers
     pub fn block_count(&self) -> Result<usize> {
-        self.inner.metadata()
+        self.kv()
             .get("llama.block_count")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
@@ -79,7 +88,7 @@ impl GgufFile {
 
     /// Get number of attention heads
     pub fn attention_head_count(&self) -> Result<usize> {
-        self.inner.metadata()
+        self.kv()
             .get("llama.attention.head_count")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
@@ -88,7 +97,7 @@ impl GgufFile {
 
     /// Get number of key/value heads (for GQA)
     pub fn attention_head_count_kv(&self) -> Option<usize> {
-        self.inner.metadata()
+        self.kv()
             .get("llama.attention.head_count_kv")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
@@ -96,7 +105,7 @@ impl GgufFile {
 
     /// Get feed forward length (intermediate size)
     pub fn feed_forward_length(&self) -> Result<usize> {
-        self.inner.metadata()
+        self.kv()
             .get("llama.feed_forward_length")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
@@ -105,7 +114,7 @@ impl GgufFile {
 
     /// Get RoPE dimension (partial rotary embedding dimension)
     pub fn rope_dim(&self) -> Option<usize> {
-        self.inner.metadata()
+        self.kv()
             .get("llama.rope.dimension")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
@@ -113,13 +122,16 @@ impl GgufFile {
 
     /// Get MoE configuration (if present)
     pub fn moe_config(&self) -> Option<MoeConfig> {
-        let expert_count = self.inner.metadata()
+        let expert_count = self
+            .kv()
             .get("llama.expert_count")
             .and_then(|v| v.as_u64())? as usize;
-        let expert_used_count = self.inner.metadata()
+        let expert_used_count = self
+            .kv()
             .get("llama.expert_used_count")
             .and_then(|v| v.as_u64())? as usize;
-        let expert_intermediate_size = self.inner.metadata()
+        let expert_intermediate_size = self
+            .kv()
             .get("llama.expert_feed_forward_length")
             .and_then(|v| v.as_u64())? as usize;
 
@@ -132,7 +144,7 @@ impl GgufFile {
 
     /// Get Qwen3-specific: full attention interval (for hybrid DeltaNet+Full)
     pub fn qwen_full_attention_interval(&self) -> Option<usize> {
-        self.inner.metadata()
+        self.kv()
             .get("qwen3.full_attention_interval")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
@@ -161,9 +173,16 @@ impl GgufFile {
 
     /// Get quantization type from first tensor
     fn quantization_type(&self) -> Result<QuantizationType> {
-        let first_tensor = self.inner.tensors().first()
+        let first_tensor = self
+            .model
+            .tensors()
+            .first()
             .ok_or_else(|| anyhow!("No tensors in GGUF file"))?;
-        QuantizationType::from_ggml_type(first_tensor.data_type)
+        let ggml_type: GGMLType = first_tensor
+            .kind
+            .try_into()
+            .map_err(|_| anyhow!("Failed to parse GGML type"))?;
+        QuantizationType::from_ggml_type(ggml_type)
     }
 
     /// Get path to the underlying file (for mmap)
@@ -172,13 +191,13 @@ impl GgufFile {
     }
 
     /// Get raw tensor info
-    pub fn tensors(&self) -> &[TensorInfo] {
-        self.inner.tensors()
+    pub fn tensors(&self) -> &[Tensor] {
+        self.model.tensors()
     }
 
     /// Get metadata value by key
     pub fn metadata(&self, key: &str) -> Option<&Value> {
-        self.inner.metadata().get(key)
+        self.kv().get(key)
     }
 }
 
@@ -189,8 +208,6 @@ pub struct MoeConfig {
     pub expert_used_count: usize,
     pub expert_intermediate_size: usize,
 }
-
-
 
 #[cfg(test)]
 mod tests {
