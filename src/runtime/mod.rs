@@ -5,15 +5,15 @@ use std::any::Any;
 /// Error type for backend operations
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
-    #[error["Out of memory"]
+    #[error("Out of memory")]
     OutOfMemory,
-    #[error["Invalid kernel: {0}"]
+    #[error("Invalid kernel: {0}")]
     InvalidKernel(String),
-    #[error["CUDA error: {0}"]
+    #[error("CUDA error: {0}")]
     CudaError(String),
-    #[error["Vulkan error: {0}"]
+    #[error("Vulkan error: {0}")]
     VulkanError(String),
-    #[error["Unsupported operation")]
+    #[error("Unsupported operation")]
     Unsupported,
 }
 

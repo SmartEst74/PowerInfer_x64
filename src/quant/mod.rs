@@ -1,17 +1,72 @@
 //! Quantization utilities
 
 use half::f16;
+use anyhow::{anyhow, Result};
 
-/// Quantization type enum (mirrored from gguf)
+/// Quantization type enum (mirrors GGML types)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuantizationType {
     Q4_0,
-    Q4_K_M,
-    Q5_K_M,
+    Q4_1,
+    Q5_0,
+    Q5_1,
     Q8_0,
+    Q2_K,
+    Q3_K_S,
+    Q3_K_M,
+    Q3_K_L,
+    Q4_K_S,
+    Q4_K_M,
+    Q5_K_S,
+    Q5_K_M,
+    Q6_K,
+    IQ1_S,
+    IQ1_M,
+    IQ2_XXS,
+    IQ2_XS,
+    IQ2_S,
+    IQ3_XXS,
+    IQ3_S,
+    IQ3_M,
+    IQ4_NL,
+    IQ4_XS,
     F16,
     F32,
-    // ... others
+}
+
+impl QuantizationType {
+    pub fn from_ggml_type(ty: gguf_rs::GgmlType) -> Result<Self> {
+        use gguf_rs::GgmlType::*;
+        match ty {
+            F32 => Ok(Self::F32),
+            F16 => Ok(Self::F16),
+            Q4_0 => Ok(Self::Q4_0),
+            Q4_1 => Ok(Self::Q4_1),
+            Q5_0 => Ok(Self::Q5_0),
+            Q5_1 => Ok(Self::Q5_1),
+            Q8_0 => Ok(Self::Q8_0),
+            Q2_K => Ok(Self::Q2_K),
+            Q3_K_S => Ok(Self::Q3_K_S),
+            Q3_K_M => Ok(Self::Q3_K_M),
+            Q3_K_L => Ok(Self::Q3_K_L),
+            Q4_K_S => Ok(Self::Q4_K_S),
+            Q4_K_M => Ok(Self::Q4_K_M),
+            Q5_K_S => Ok(Self::Q5_K_S),
+            Q5_K_M => Ok(Self::Q5_K_M),
+            Q6_K => Ok(Self::Q6_K),
+            IQ1_S => Ok(Self::IQ1_S),
+            IQ1_M => Ok(Self::IQ1_M),
+            IQ2_XXS => Ok(Self::IQ2_XXS),
+            IQ2_XS => Ok(Self::IQ2_XS),
+            IQ2_S => Ok(Self::IQ2_S),
+            IQ3_XXS => Ok(Self::IQ3_XXS),
+            IQ3_S => Ok(Self::IQ3_S),
+            IQ3_M => Ok(Self::IQ3_M),
+            IQ4_NL => Ok(Self::IQ4_NL),
+            IQ4_XS => Ok(Self::IQ4_XS),
+            _ => Err(anyhow!("Unsupported GGML type: {:?}", ty)),
+        }
+    }
 }
 
 /// Dequantize a block of quantized data to f16
@@ -28,7 +83,7 @@ pub fn dequantize_block(
 
 /// Quantized matrix multiplication (SPARSE variant)
 /// Computes: output = input @ weights.T, where only hot rows of weights are used
-/// 
+///
 /// # Arguments
 /// - `hot_indices`: indices of output neurons to compute (on GPU)
 /// - `weights`: full weight matrix [n_out, n_in] in quantized form

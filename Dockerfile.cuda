@@ -1,0 +1,33 @@
+FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_PATH=/usr/local/cuda
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust nightly
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && rustup toolchain install nightly-2025-06-23 \
+    && rustup default nightly-2025-06-23 \
+    && rustup component add rust-src rustc-dev llvm-tools-preview
+
+WORKDIR /workspace
+
+# Copy project files for dependency caching
+COPY Cargo.toml rust-toolchain.toml ./
+COPY build.rs ./
+COPY src/ src/
+COPY kernels/ kernels/
+
+# Build CPU-only by default (CUDA features available via --features cuda)
+RUN cargo build --release 2>&1 || true
+
+CMD ["/bin/bash"]

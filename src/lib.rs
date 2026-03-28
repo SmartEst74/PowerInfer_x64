@@ -10,11 +10,11 @@
 //! ## Quick Example
 //!
 //! ```no_run
-//! use powerinfer::{gguf::GgufFile, model::InferenceContext, runtime::Backend};
+//! use powerinfer::{gguf::GgufFile, model::InferenceContext, runtime::BackendFactory};
 //!
 //! # fn main() -> anyhow::Result<()> {
 //! let gguf = GgufFile::open("models/Qwen3-8B-Q4_K_M.gguf")?;
-//! let mut ctx = InferenceContext::from_gguf(gguf, Backend::cpu())?;
+//! let mut ctx = InferenceContext::from_gguf(gguf, BackendFactory::cpu())?;
 //!
 //! let output = ctx.generate("Hello, world!", 100)?;
 //! println!("{}", output);
@@ -35,7 +35,6 @@ pub mod tokenizer;
 // Re-exports
 pub use gguf::GgufFile;
 pub use model::{InferenceContext, ModelConfig};
-pub use runtime::Backend;
 
 /// Result type alias with anyhow::Error
 pub type Result<T> = std::result::Result<T, anyhow::Error>;

@@ -5,17 +5,16 @@
 
 use axum::{
     routing::{post, get},
-    Router, Json, extract::State, http::{StatusCode, header},
-    response::{Response, sse::Sse},
+    Router, Json, extract::State, http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 use tower_http::cors::{CorsLayer, Any};
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::{Result, InferenceContext};
-use crate::runtime::Backend;
+use crate::InferenceContext;
 
 /// Application state shared across requests
 pub struct AppState {
@@ -79,6 +78,30 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// API error type for axum handlers
+pub struct ApiError(anyhow::Error);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": {
+                    "message": self.0.to_string(),
+                    "type": "server_error"
+                }
+            })),
+        )
+            .into_response()
+    }
+}
+
+impl<E: Into<anyhow::Error>> From<E> for ApiError {
+    fn from(err: E) -> Self {
+        Self(err.into())
+    }
+}
+
 /// Build Axum router with all endpoints
 pub fn build_router(state: AppState) -> Router {
     Router::new()
@@ -91,18 +114,26 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// Start the HTTP server
-pub async fn serve(config: ServerConfig) -> Result<()> {
-    // Load model
+pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
     info!("Loading model from: {}", config.model_path);
-    let ctx = InferenceContext::from_gguf(&config.model_path, crate::runtime::BackendFactory::cpu())?;
-    info!("Model loaded: {} ({} layers)", 
+    let ctx = InferenceContext::from_gguf(
+        &config.model_path,
+        crate::runtime::BackendFactory::cpu(),
+    )?;
+    info!(
+        "Model loaded: {} ({} layers)",
         ctx.config().name.as_deref().unwrap_or("unknown"),
-        ctx.config().block_count);
+        ctx.config().block_count
+    );
 
     let ctx = Arc::new(RwLock::new(Arc::new(ctx)));
-    let max_concurrent = if config.max_concurrent == 0 { 1 } else { config.max_concurrent };
+    let max_concurrent = if config.max_concurrent == 0 {
+        1
+    } else {
+        config.max_concurrent
+    };
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
-    
+
     let state = AppState {
         model: ctx,
         max_concurrent,
@@ -111,11 +142,11 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 
     let router = build_router(state);
     let addr = format!("{}:{}", config.host, config.port).parse()?;
-    
+
     info!("PowerInfer_x64 server listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, router).await?;
-    
+
     Ok(())
 }
 
@@ -123,13 +154,12 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 async fn handle_completions(
     State(state): State<AppState>,
     Json(req): Json<CompletionRequest>,
-) -> Result<Json<CompletionResponse>> {
+) -> Result<Json<CompletionResponse>, ApiError> {
     let _permit = state.semaphore.clone().acquire_owned().await?;
-    
-    let model = state.model.read().await;
-    // TODO: actually generate
+
+    let _model = state.model.read().await;
     let text = format!("[DUMMY] Response to: {}", req.prompt);
-    
+
     let resp = CompletionResponse {
         id: "cmpl-123".to_string(),
         object: "text_completion".to_string(),
@@ -142,7 +172,7 @@ async fn handle_completions(
             finish_reason: "stop".to_string(),
         }],
     };
-    
+
     Ok(Json(resp))
 }
 
@@ -150,18 +180,18 @@ async fn handle_completions(
 async fn handle_chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Result<Json<CompletionResponse>> {
+) -> Result<Json<CompletionResponse>, ApiError> {
     let _permit = state.semaphore.clone().acquire_owned().await?;
-    
-    // Construct prompt from messages (simple concatenation for now)
-    let prompt = req.messages.iter()
+
+    let prompt = req
+        .messages
+        .iter()
         .map(|m| format!("{}: {}\n", m.role, m.content))
         .collect::<String>();
-    
-    let model = state.model.read().await;
-    // TODO: actual generation
+
+    let _model = state.model.read().await;
     let text = format!("[DUMMY CHAT] Reply to: {}", prompt);
-    
+
     let resp = CompletionResponse {
         id: "chatcmpl-123".to_string(),
         object: "chat.completion".to_string(),
@@ -174,16 +204,15 @@ async fn handle_chat_completions(
             finish_reason: "stop".to_string(),
         }],
     };
-    
+
     Ok(Json(resp))
 }
 
 /// Handle /v1/models
 async fn handle_list_models(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>> {
-    let model = state.model.read().await;
-    Ok(Json(serde_json::json!({
+    State(_state): State<AppState>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
         "object": "list",
         "data": [
             {
@@ -193,20 +222,26 @@ async fn handle_list_models(
                 "permission": []
             }
         ]
-    })))
+    }))
 }
 
 /// Health check
-async fn handle_health() -> Result<Response> {
-    Ok(Response::new("OK".into()))
+async fn handle_health() -> &'static str {
+    "OK"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
-    async fn test_server_build() {
-        // Will test actual server once model is implemented
+    async fn test_server_types() {
+        let _config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            model_path: "test.gguf".to_string(),
+            max_concurrent: 4,
+            max_queue_depth: 64,
+        };
     }
 }

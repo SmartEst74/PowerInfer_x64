@@ -43,7 +43,6 @@ clap = { version = "4.5", features = ["derive"] }
 comfy-table = "7.1"
 memmap2 = { version = "0.9", optional = true }
 bytemuck = "1.14"
-thiserror = "1.0"
 chrono = { version = "0.4", features = ["serde"] }  # For timestamps
 num_cpus = "1.16"  # For default thread count
 regex = "1.10"
@@ -53,7 +52,7 @@ cust = { version = "0.3", optional = true }
 ash = { version = "0.38", optional = true }
 
 [build-dependencies]
-rust-gpu = { git = "https://github.com/rust-gpu/rust-gpu", optional = true, default-features = false }
+# rust-gpu will be added when GPU kernel compilation is implemented
 
 [dev-dependencies]
 criterion = "0.5"
@@ -61,8 +60,8 @@ criterion = "0.5"
 [features]
 default = ["cpu"]
 cpu = []
-cuda = ["dep:cust", "kernel/cuda"]
-vulkan = ["dep:ash", "kernel/vulkan"]
+cuda = ["dep:cust"]
+vulkan = ["dep:ash"]
 server = ["dep:axum", "dep:tower-http", "tokio/rt-multi-thread"]
 profiling = ["rayon", "memmap2"]
 predictor = ["ndarray"]

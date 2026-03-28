@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use crate::gguf::{GgufFile, ModelConfig};
+use crate::gguf::GgufFile;
 use crate::quant::QuantizationType;
-use crate::runtime::{Backend, BackendFactory};
+use crate::runtime::Backend;
 use crate::Result;
 
 /// Model configuration extracted from GGUF
@@ -35,17 +35,13 @@ pub struct ModelConfig {
 pub struct InferenceContext {
     config: ModelConfig,
     backend: Box<dyn Backend>,
-    // tokenizer: Tokenizer,
-    // weights: WeightLoader,
-    // kv_cache: KVCache,
-    // other state...
 }
 
 impl InferenceContext {
     /// Build inference context from GGUF file
     pub fn from_gguf<P: AsRef<Path>>(
         gguf_path: P,
-        backend: Backend,
+        backend: Box<dyn Backend>,
     ) -> Result<Self> {
         let gguf = GgufFile::open(gguf_path)?;
         let config = gguf.model_config()?;
