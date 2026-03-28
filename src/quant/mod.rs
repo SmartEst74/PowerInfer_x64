@@ -82,7 +82,7 @@ impl QuantizationType {
             Self::Q3_K_S | Self::Q3_K_M | Self::Q3_K_L => 110,
             Self::Q4_K_S | Self::Q4_K_M => 144,
             Self::Q5_K_S | Self::Q5_K_M => 176,
-            Self::Q6_K => 210,
+            Self::Q6_K => 212,
             _ => 0,
         }
     }
@@ -135,6 +135,9 @@ pub fn dequantize(
         QuantizationType::Q5_0 => dequantize_q5_0(data, rows, cols),
         QuantizationType::Q5_1 => dequantize_q5_1(data, rows, cols),
         QuantizationType::Q8_0 => dequantize_q8_0(data, rows, cols),
+        QuantizationType::Q4_K_S | QuantizationType::Q4_K_M => dequantize_q4_k(data, rows, cols),
+        QuantizationType::Q5_K_S | QuantizationType::Q5_K_M => dequantize_q5_k(data, rows, cols),
+        QuantizationType::Q6_K => dequantize_q6_k(data, rows, cols),
         _ => Err(anyhow!("Dequantization not yet implemented for {qtype:?}")),
     }
 }
@@ -335,6 +338,255 @@ fn dequantize_q8_0(data: &[u8], rows: usize, cols: usize) -> Result<Vec<f32>> {
     Ok(out)
 }
 
+// --- K-quants (superblock format from llama.cpp) ---
+// Reference: https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c
+
+/// Extract 6-bit scale and min values from Q4_K/Q5_K packed scales.
+/// The scales array is 8 bytes, packing 8 scale values and 8 min values as 6-bit each.
+fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        let d = scales[j] & 63;
+        let m = scales[j + 4] & 63;
+        (d, m)
+    } else {
+        let d = (scales[j + 4] & 0xF) | ((scales[j - 4] >> 6) << 4);
+        let m = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
+        (d, m)
+    }
+}
+
+/// Dequantize Q4_K (also called Q4_K_M / Q4_K_S in GGUF).
+///
+/// Block: 144 bytes for 256 values.
+/// Layout:
+///   bytes 0-3:   d (f16), dmin (f16)
+///   bytes 4-15:  scales (12 bytes, 6-bit packed scale+min per group of 32)
+///   bytes 16-143: qs (128 bytes, 4-bit quantized values)
+///
+/// Dequant formula: value = d * sc * nibble - dmin * m
+fn dequantize_q4_k(data: &[u8], rows: usize, cols: usize) -> Result<Vec<f32>> {
+    let qk_k = 256usize;
+    let block_size = 144usize;
+    let blocks_per_row = cols / qk_k;
+    let total_blocks = rows * blocks_per_row;
+    let expected = total_blocks * block_size;
+
+    if data.len() < expected {
+        return Err(anyhow!(
+            "Insufficient data for Q4_K dequant: need {expected}, have {}",
+            data.len()
+        ));
+    }
+
+    let actual_blocks = data.len() / block_size;
+    let total_blocks = total_blocks.min(actual_blocks);
+    let mut out = Vec::with_capacity(total_blocks * qk_k);
+    let mut offset = 0usize;
+
+    for _ in 0..total_blocks {
+        let d = f16::from_le_bytes([data[offset], data[offset + 1]]).to_f32();
+        let dmin = f16::from_le_bytes([data[offset + 2], data[offset + 3]]).to_f32();
+
+        // 12 bytes of packed 6-bit scales/mins
+        let scales = &data[offset + 4..offset + 16];
+
+        // 128 bytes of 4-bit quantized values
+        let qs = &data[offset + 16..offset + 144];
+
+        let mut is = 0usize;
+        let mut qi = 0usize;
+
+        for _ in 0..4 {
+            let (sc, m) = get_scale_min_k4(is, scales);
+            let d1 = d * sc as f32;
+            let m1 = dmin * m as f32;
+            for j in 0..16 {
+                out.push(d1 * (qs[qi + j] & 0xF) as f32 - m1);
+            }
+            for j in 0..16 {
+                out.push(d1 * (qs[qi + j] >> 4) as f32 - m1);
+            }
+            is += 1;
+            qi += 16;
+
+            let (sc, m) = get_scale_min_k4(is, scales);
+            let d2 = d * sc as f32;
+            let m2 = dmin * m as f32;
+            for j in 0..16 {
+                out.push(d2 * (qs[qi + j] & 0xF) as f32 - m2);
+            }
+            for j in 0..16 {
+                out.push(d2 * (qs[qi + j] >> 4) as f32 - m2);
+            }
+            is += 1;
+            qi += 16;
+        }
+
+        offset += block_size;
+    }
+
+    Ok(out)
+}
+
+/// Dequantize Q5_K (also called Q5_K_M / Q5_K_S in GGUF).
+///
+/// Block: 176 bytes for 256 values.
+/// Layout:
+///   bytes 0-3:   d (f16), dmin (f16)
+///   bytes 4-15:  scales (12 bytes, same as Q4_K)
+///   bytes 16-47: qh (32 bytes, high bits for 5-bit values)
+///   bytes 48-175: ql (128 bytes, low 4 bits)
+fn dequantize_q5_k(data: &[u8], rows: usize, cols: usize) -> Result<Vec<f32>> {
+    let qk_k = 256usize;
+    let block_size = 176usize;
+    let blocks_per_row = cols / qk_k;
+    let total_blocks = rows * blocks_per_row;
+    let expected = total_blocks * block_size;
+
+    if data.len() < expected {
+        return Err(anyhow!(
+            "Insufficient data for Q5_K dequant: need {expected}, have {}",
+            data.len()
+        ));
+    }
+
+    let actual_blocks = data.len() / block_size;
+    let total_blocks = total_blocks.min(actual_blocks);
+    let mut out = Vec::with_capacity(total_blocks * qk_k);
+    let mut offset = 0usize;
+
+    for _ in 0..total_blocks {
+        let d = f16::from_le_bytes([data[offset], data[offset + 1]]).to_f32();
+        let dmin = f16::from_le_bytes([data[offset + 2], data[offset + 3]]).to_f32();
+
+        let scales = &data[offset + 4..offset + 16];
+        let qh = &data[offset + 16..offset + 48];
+        let ql = &data[offset + 48..offset + 176];
+
+        let mut is = 0usize;
+        let mut qi = 0usize;
+        let mut m1 = 1u8;
+        let mut m2 = 2u8;
+
+        for _ in 0..4 {
+            let (sc, m) = get_scale_min_k4(is, scales);
+            let d1 = d * sc as f32;
+            let m1f = dmin * m as f32;
+
+            for j in 0..16 {
+                let lo = ql[qi + j] & 0xF;
+                let hi = if (qh[j] & m1) != 0 { 16 } else { 0 };
+                out.push(d1 * (lo | hi) as f32 - m1f);
+            }
+            for j in 16..32 {
+                let lo = ql[qi + j - 16] >> 4;
+                let hi = if (qh[j] & m1) != 0 { 16 } else { 0 };
+                out.push(d1 * (lo | hi) as f32 - m1f);
+            }
+
+            is += 1;
+            qi += 16;
+
+            let (sc, m) = get_scale_min_k4(is, scales);
+            let d2 = d * sc as f32;
+            let m2f = dmin * m as f32;
+
+            for j in 0..16 {
+                let lo = ql[qi + j] & 0xF;
+                let hi = if (qh[j] & m2) != 0 { 16 } else { 0 };
+                out.push(d2 * (lo | hi) as f32 - m2f);
+            }
+            for j in 16..32 {
+                let lo = ql[qi + j - 16] >> 4;
+                let hi = if (qh[j] & m2) != 0 { 16 } else { 0 };
+                out.push(d2 * (lo | hi) as f32 - m2f);
+            }
+
+            is += 1;
+            qi += 16;
+            m1 <<= 2;
+            m2 <<= 2;
+        }
+
+        offset += block_size;
+    }
+
+    Ok(out)
+}
+
+/// Dequantize Q6_K.
+///
+/// Block: 210 bytes for 256 values.
+/// Layout:
+///   bytes 0-1:   d (f16)
+///   bytes 2-129: ql (128 bytes, low 4 bits, 2 values per byte)
+///   bytes 130-193: qh (64 bytes, high 2 bits, 4 values per byte)
+///   bytes 194-211: scales (18 bytes, signed i8, shifted by 32)
+///
+/// Dequant formula: value = d * scale * (ql + 16*qh - 32)
+fn dequantize_q6_k(data: &[u8], rows: usize, cols: usize) -> Result<Vec<f32>> {
+    let qk_k = 256usize;
+    let block_size = 212usize; // d(2) + ql(128) + qh(64) + scales(18) = 212
+    let blocks_per_row = cols / qk_k;
+    let total_blocks = rows * blocks_per_row;
+    let expected = total_blocks * block_size;
+
+    if data.len() < expected {
+        return Err(anyhow!(
+            "Insufficient data for Q6_K dequant: need {expected}, have {}",
+            data.len()
+        ));
+    }
+
+    // Use the actual available data, rounded down to exact block boundaries
+    let total_blocks = (data.len() / block_size).min(total_blocks);
+    let mut out = Vec::with_capacity(total_blocks * qk_k);
+    let mut offset = 0usize;
+
+    for _ in 0..total_blocks {
+        let d = f16::from_le_bytes([data[offset], data[offset + 1]]).to_f32();
+
+        let ql = &data[offset + 2..offset + 130]; // 128 bytes
+        let qh = &data[offset + 130..offset + 194]; // 64 bytes
+        let scales = &data[offset + 194..offset + 212]; // 18 bytes, i8 shifted by 32
+
+        let mut is = 0usize;
+
+        for _super in 0..2 {
+            for _group in 0..4 {
+                let sc = (scales[is] as i32) - 32;
+                let d1 = d * sc as f32;
+
+                // Each group: 32 values
+                // ql stores low 4 bits: 2 values per byte, 16 bytes per 32 values
+                // qh stores high 2 bits: 4 values per byte, 8 bytes per 32 values
+                let ql_offset = (is / 4) * 64 + (is % 4) * 16; // position in ql
+                let qh_offset = (is / 4) * 32 + (is % 4) * 8; // position in qh
+
+                for j in 0..32 {
+                    let lo = if j < 16 {
+                        ql[ql_offset + j] & 0xF
+                    } else {
+                        ql[ql_offset + j - 16] >> 4
+                    };
+
+                    let qh_byte = qh[qh_offset + j / 4];
+                    let hi = ((qh_byte >> (2 * (j % 4))) & 3) as i32;
+
+                    let q6 = lo as i32 + 16 * hi - 32;
+                    out.push(d1 * q6 as f32);
+                }
+
+                is += 1;
+            }
+        }
+
+        offset += block_size;
+    }
+
+    Ok(out)
+}
+
 /// Matrix-vector multiplication: y = x @ w
 /// where x is [n_in], w is [n_out, n_in] (row-major), y is [n_out]
 pub fn matvec_f32(y: &mut [f32], x: &[f32], w: &[f32], n_out: usize, n_in: usize) {
@@ -449,5 +701,93 @@ mod tests {
         for v in &out {
             assert!((v - (-8.0)).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn test_q4_k_dequantize() {
+        let d = f16::from_f32(1.0);
+        let dmin = f16::from_f32(0.0);
+        let mut block = Vec::new();
+        block.extend_from_slice(&d.to_le_bytes()); // d
+        block.extend_from_slice(&dmin.to_le_bytes()); // dmin
+        block.extend_from_slice(&[0u8; 12]); // scales (12 bytes, all 0)
+        block.extend_from_slice(&[0u8; 128]); // qs (128 bytes, all 0)
+
+        let out = dequantize_q4_k(&block, 1, 256).unwrap();
+        assert_eq!(out.len(), 256);
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_q5_k_dequantize() {
+        let d = f16::from_f32(1.0);
+        let dmin = f16::from_f32(0.0);
+        let mut block = Vec::new();
+        block.extend_from_slice(&d.to_le_bytes());
+        block.extend_from_slice(&dmin.to_le_bytes());
+        block.extend_from_slice(&[0u8; 12]); // scales (12 bytes)
+        block.extend_from_slice(&[0u8; 32]); // qh (high bits, all 0)
+        block.extend_from_slice(&[0u8; 128]); // ql (low bits, all 0)
+
+        let out = dequantize_q5_k(&block, 1, 256).unwrap();
+        assert_eq!(out.len(), 256);
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_q6_k_dequantize() {
+        let d = f16::from_f32(1.0);
+        let mut block = Vec::new();
+        block.extend_from_slice(&d.to_le_bytes()); // d
+        block.extend_from_slice(&[0u8; 128]); // ql
+        block.extend_from_slice(&[0u8; 64]); // qh
+                                             // scales: 18 bytes, all 32 (= 0 after subtracting 32)
+        block.extend_from_slice(&[32u8; 18]);
+
+        let out = dequantize_q6_k(&block, 1, 256).unwrap();
+        assert_eq!(out.len(), 256);
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_k_quant_block_sizes() {
+        // Verify our block size calculations match the GGUF spec
+        assert_eq!(QuantizationType::Q4_K_M.block_size_bytes(), 144);
+        assert_eq!(QuantizationType::Q5_K_M.block_size_bytes(), 176);
+        assert_eq!(QuantizationType::Q6_K.block_size_bytes(), 212);
+        assert_eq!(QuantizationType::Q4_K_M.values_per_block(), 256);
+        assert_eq!(QuantizationType::Q5_K_M.values_per_block(), 256);
+        assert_eq!(QuantizationType::Q6_K.values_per_block(), 256);
+    }
+
+    #[test]
+    fn test_get_scale_min_k4() {
+        // 8-byte scales array
+        // j < 4: d = q[j] & 63, m = q[j+4] & 63
+        // j >= 4: d = (q[j+4]&0xF) | ((q[j-4]>>6)<<4)
+        //         m = (q[j+4]>>4) | ((q[j]>>6)<<4)
+        let scales = [0xFF, 0x00, 0x3F, 0x20, 0x0F, 0x30, 0x01, 0x02];
+
+        // j=0: d = scales[0] & 63 = 0xFF & 63 = 63, m = scales[4] & 63 = 0x0F
+        let (d, m) = get_scale_min_k4(0, &scales);
+        assert_eq!(d, 63);
+        assert_eq!(m, 15);
+
+        // j=4: d = (scales[8] & 0xF) | ((scales[0] >> 6) << 4) — but scales is 8 bytes!
+        // So j can only go up to 3 for the first call, then 4-7 for the second
+        // Actually: j ranges 0..8 for 8 groups
+        // j=4: d = (scales[8] & 0xF) — OUT OF BOUNDS if scales is only 8 bytes
+        // But the llama.cpp code accesses q[j+4] for j>=4, meaning q[8..11]
+        // This means the scales array in the block is actually larger than 8 bytes
+
+        // The GGUF file stores 12 bytes of scales (matching the C struct)
+        // So get_scale_min_k4 needs at least 12 bytes
+        let scales12 = [
+            0xFF, 0x00, 0x3F, 0x20, 0x0F, 0x30, 0x01, 0x02, 0x0A, 0x0B, 0x0C, 0x0D,
+        ];
+        let (d, _m) = get_scale_min_k4(4, &scales12);
+        // d = (scales[8] & 0xF) | ((scales[0] >> 6) << 4) = (0x0A & 0xF) | ((0xFF >> 6) << 4)
+        //   = 0x0A | (3 << 4) = 0x0A | 0x30 = 0x3A = 58
+        assert_eq!(d, 58);
     }
 }
