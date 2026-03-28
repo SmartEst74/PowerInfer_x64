@@ -1,37 +1,12 @@
-# AGENTS.md — AI Coding Assistant Handoff Guide
+# AGENTS.md
 
-## Project Overview
-
-PowerInfer_x64 is a neuron-level sparse LLM inference engine in pure Rust. The goal is to run Qwen3.5-35B-A3B (35B total params, 3B active per token, MoE) on 2× GTX 1050 Ti (8GB VRAM) by splitting computation: hot neurons on GPU, cold neurons on CPU.
-
-## Current State (2026-03-28)
-
-**What works:**
-- GGUF v3 parser: loads real models (tested with Arch-Agent-3B Q8_0, 3.1GB)
-- Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, F32, F16 dequantization
-- Forward pass: RMSNorm, RoPE, multi-head attention, SwiGLU FFN — functional but slow (no SIMD)
-- BPE tokenizer: loads vocab from GGUF metadata
-- TurboQuant KV cache compression: algorithm implemented, 8x compression ratio
-- Activation profiler: tracks neuron hotness, exports hot neuron index
-- Prometheus metrics endpoint (/metrics)
-- CI/CD pipeline with matrix testing
-
-**What doesn't work yet:**
-- Q4_K_M/Q5_K dequantization (blocks Qwen3-4B and Qwen3.5-35B-A3B)
-- SIMD matmul (forward pass too slow for 3B+ models)
-- MoE routing (needed for 35B-A3B)
-- Sparse GPU execution (hot neurons on GPU, cold on CPU)
-- Quality validation against real models
-
-**Test count:** 51 tests, all pass, 0 clippy warnings
-
-## Build & Test
+## Build & Test Commands
 
 ```bash
 # Build
 cargo build
 
-# Run all tests
+# Run all tests (must pass before committing)
 cargo test
 
 # Run with server feature
@@ -41,114 +16,112 @@ cargo test --features server
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features server -- -D warnings
 
-# Test against real model (needs GGUF file)
-cargo run --bin real_test -- /path/to/model.gguf
+# Format check
+cargo fmt --all --check
+
+# Test against real model
+cargo run --bin real_test -- /home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf
 
 # Dump GGUF metadata
 cargo run --bin gguf_dump -- /path/to/model.gguf
 ```
 
+## Tech Stack
+
+- Rust nightly-2025-06-23 (for rust-gpu)
+- `gguf-rs` 0.1.7 (GGUF parsing)
+- `half` 2.4 (f16 support)
+- `anyhow` 1.0 (error handling)
+- Axum 0.7 + Tokio (HTTP server, optional)
+- Prometheus 0.13 (metrics, optional)
+
 ## Project Structure
 
-```
-src/
-  lib.rs              — public API, module declarations
-  gguf/mod.rs         — GGUF parser, model config extraction
-  quant/mod.rs        — dequantization kernels (Q4_0, Q8_0, etc.)
-  ops.rs              — tensor ops (RMSNorm, RoPE, attention, SwiGLU, matvec)
-  model/mod.rs        — forward pass, InferenceContext, KV cache
-  weights.rs          — weight loader (GGUF → f32)
-  tokenizer.rs        — BPE tokenizer from GGUF vocab
-  turboquant/mod.rs   — KV cache compression (Google TurboQuant, ICLR 2026)
-  activation/mod.rs   — neuron hotness profiler, HotNeuronIndex
-  benchmark/mod.rs    — perplexity measurement, reference comparison
-  metrics.rs          — Prometheus metrics (9 metrics)
-  server/mod.rs       — Axum HTTP server, OpenAI-compatible API
-  runtime/mod.rs      — Backend trait, CPU/CUDA/Vulkan backends
-  cli.rs              — CLI entry point
-  profiler.rs         — profiler binary entry point
-  bin/real_test.rs    — real model test binary
-  bin/gguf_dump.rs    — GGUF metadata dump binary
-  bin/powerinfer-serve.rs — server binary
+- `src/quant/mod.rs` — Dequantization kernels (Q4_0, Q8_0, Q5_0, Q5_1, F32, F16). You READ and WRITE here.
+- `src/ops.rs` — Tensor ops (RMSNorm, RoPE, attention, SwiGLU, matvec). You READ and WRITE here.
+- `src/gguf/mod.rs` — GGUF parser, model config. You READ and WRITE here.
+- `src/model/mod.rs` — Forward pass, InferenceContext. You READ and WRITE here.
+- `src/weights.rs` — Weight loader (GGUF → f32). You READ and WRITE here.
+- `src/tokenizer.rs` — BPE tokenizer. You READ and WRITE here.
+- `src/turboquant/mod.rs` — KV cache compression (TurboQuant). You READ here.
+- `src/activation/mod.rs` — Neuron hotness profiler. You READ here.
+- `src/benchmark/mod.rs` — Perplexity, reference comparison. You READ here.
+- `src/server/mod.rs` — HTTP server. You READ here.
+- `src/runtime/mod.rs` — Backend trait, CPU/CUDA/Vulkan. You READ here.
+- `src/metrics.rs` — Prometheus metrics. You READ here.
+- `src/cli.rs` — CLI entry point. You READ here.
+- `src/profiler.rs` — Profiler binary entry point. You READ here.
+- `src/bin/` — Binary entry points (real_test, gguf_dump, powerinfer-serve).
+- `tests/` — Smoke, soak, integration tests. You WRITE here.
+- `docs/` — Architecture, build, performance docs. You READ here.
+- `AGENTS.md` — This file. You READ here.
+- `QUALITY.md` — Quality baseline and honest gaps. You READ here.
+- `PLAN.md` — 48-week implementation plan. You READ here.
 
-tests/
-  smoke.rs            — 6 smoke tests (pipeline produces finite output)
-  soak.rs             — 7 soak tests (10K iterations, memory stability)
-  integration.rs      — 5 integration tests (multi-module pipelines)
+## Code Style
 
-docs/
-  architecture.md     — full architecture with citations
-  build.md            — build instructions
-  performance.md      — performance tuning guide
-```
+- Use `anyhow::Result` throughout, not `std::result::Result`
+- Use `#[allow(non_camel_case_types)]` for GGML type enums
+- Use `crate::` in lib modules, `powerinfer::` in binary files
+- Use architecture-agnostic `get_config()` for GGUF keys (supports qwen2, qwen3, llama)
+- Inline format args: `format!("{x}")` not `format!("{}", x)`
+- Use `.div_ceil()` not `(x + n - 1) / n`
 
-## Key Design Decisions
+## Boundaries
 
-1. **Architecture-agnostic GGUF**: Uses `general.architecture` prefix (qwen2, qwen3, llama) instead of hardcoded `llama.` keys
-2. **Weights stored as f32**: Dequantize on load for simplicity. Can be optimized later with fused dequant+matvec.
-3. **TurboQuant for KV cache**: Compresses keys to 3-bit, values to 3-bit. Asymmetric estimator computes attention directly from compressed data.
-4. **Activation profiling**: Records FFN gate activations, identifies hot neurons by hotness ratio threshold.
+### Always Do
 
-## Next Steps (Priority Order)
+- Run `cargo clippy --all-targets -- -D warnings` before committing
+- Run `cargo test` before committing
+- Update `QUALITY.md` with results after real model tests
+- Cite sources for external references (arXiv papers, GitHub repos)
+- Test against `/home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf` for real model validation
 
-1. **Q4_K_M dequantization** (Issue #37) — blocks Qwen3-4B and Qwen3.5-35B-A3B
-   - Q4_K_M uses superblock scaling: 256 values, 2 scales (d, m) per 128 values
-   - Reference: llama.cpp ggml-quants.c Q4_K implementation
-   
-2. **Q5_K dequantization** (Issue #38) — same superblock pattern, 5-bit
+### Ask First Before
 
-3. **SIMD matmul** (Issue #40-45) — makes inference fast enough
-   - Use std::simd (f32x8, f16x8)
-   - Tiled matmul (64×64, 128×128 for L1/L2 cache)
-   - Fused dequant+matmul (avoid full dequant buffer)
+- Adding new dependencies to Cargo.toml
+- Changing the GGUF parser API (affects all modules)
+- Modifying the forward pass architecture
+- Adding new binary entry points
 
-4. **MoE routing** (Issue #81) — needed for 35B-A3B
-   - Router selects top-k experts per token
-   - Only active experts computed on GPU
+### Never Do
 
-5. **Sparse GPU execution** (Issue #75) — the core innovation
-   - Hot neuron weights on GPU, cold on CPU
-   - Predictor (tiny MLP) decides hot/cold
+- Hardcode `llama.` prefix for GGUF keys — use `get_config()` which supports any architecture
+- Use `crate::` in binary files — use `powerinfer::`
+- Claim "works" without a real model test
+- Write tests only on synthetic data
+- Add features without an open GitHub issue
+- Use `cargo check` without hiding the stale parent files (see Important Notes)
 
-## What NOT to Do
+## Git Workflow
 
-- Don't add features without an open GitHub issue
-- Don't claim "works" without a real model test
-- Don't write tests only on synthetic data — test against real GGUF files
-- Don't hardcode `llama.` prefix — use architecture-agnostic `get_config()`
-- Don't add dependencies without checking Cargo.toml first
-- Don't use `crate::` in binary files — use `powerinfer::`
-
-## How to Verify Changes
-
-1. `cargo clippy --all-targets -- -D warnings` — must pass
-2. `cargo test` — all 51+ tests must pass
-3. `cargo run --bin real_test -- /home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf` — GGUF must load
-4. Update QUALITY.md with results
+- Commit message format: imperative mood, explain WHY not WHAT
+- Example: `Fix GGUF config parser to support architecture-specific prefixes`
+- Run `cargo clippy` and `cargo test` before every commit
 
 ## Available Models (on disk)
 
 ```
 /home/jon/models/llama-cache/
-  Arch-Agent-3B.Q8_0.gguf              3.1GB  Q8_0   Qwen2 arch, 36 layers, 2048 dim
-  Qwen3-4B-Instruct-2507-Q4_K_M.gguf  2.4GB  Q4_K_M Qwen3 arch, 36 layers, 2560 dim
-  gemma-3-4b-it-Q4_K_M.gguf           2.4GB  Q4_K_M Gemma arch
-  BitAgent-Bounty-8B.Q4_K_M.gguf      4.6GB  Q4_K_M
-  Salesforce.Llama-xLAM-2-8b-fc-r.Q4_K_M.gguf 4.6GB Q4_K_M
+  Arch-Agent-3B.Q8_0.gguf              3.1GB  Q8_0   Qwen2 arch ✅ WORKS
+  Qwen3-4B-Instruct-2507-Q4_K_M.gguf  2.4GB  Q4_K_M Qwen3 arch ❌ NEEDS Q5_K
+  gemma-3-4b-it-Q4_K_M.gguf           2.4GB  Q4_K_M Gemma arch ❌ NEEDS Q4_K_M
+  BitAgent-Bounty-8B.Q4_K_M.gguf      4.6GB  Q4_K_M ❌ NEEDS Q4_K_M
+  Salesforce.Llama-xLAM-2-8b-fc-r.Q4_K_M.gguf 4.6GB Q4_K_M ❌ NEEDS Q4_K_M
 ```
 
-## References (verified, not hallucinated)
+## Verified References
 
-- PowerInfer: arxiv.org/abs/2312.12456
-- PowerInfer-2: arxiv.org/abs/2406.06282
-- TurboQuant: arxiv.org/abs/2504.19874 (ICLR 2026)
-- Qwen3.5-35B-A3B: huggingface.co/Qwen/Qwen3.5-35B-A3B
-- gguf-rs: crates.io/crates/gguf-rs
-- llama.cpp: github.com/ggml-org/llama.cpp (reference for quant formats)
+- PowerInfer: https://arxiv.org/abs/2312.12456
+- PowerInfer-2: https://arxiv.org/abs/2406.06282
+- TurboQuant: https://arxiv.org/abs/2504.19874
+- Qwen3.5-35B-A3B: https://huggingface.co/Qwen/Qwen3.5-35B-A3B
+- gguf-rs: https://crates.io/crates/gguf-rs
+- llama.cpp (reference for quant formats): https://github.com/ggml-org/llama.cpp
 
 ## Important Notes
 
-- The stale `/home/jon/Cargo.toml` and `/home/jon/src/` interfere with `cargo check`. Hide them before building:
+- Stale `/home/jon/Cargo.toml` and `/home/jon/src/` interfere with `cargo check`. Hide them before building:
   ```bash
   mv /home/jon/Cargo.toml /home/jon/Cargo.toml.bak
   mv /home/jon/src /home/jon/src.bak
@@ -156,5 +129,12 @@ docs/
   mv /home/jon/Cargo.toml.bak /home/jon/Cargo.toml
   mv /home/jon/src.bak /home/jon/src
   ```
-- Rust toolchain: nightly-2025-06-23 (for rust-gpu)
-- The project uses `anyhow::Result` throughout, not `std::result::Result`
+- The project uses `nightly-2025-06-23` toolchain (for rust-gpu)
+
+## Current State (2026-03-28)
+
+**Working:** GGUF parsing, Q8_0/Q4_0/Q5_0/Q5_1/F32/F16 dequant, forward pass (functional, slow), BPE tokenizer, TurboQuant algorithm, activation profiler, Prometheus metrics, CI/CD pipeline. 51 tests pass, 0 clippy warnings.
+
+**Not working:** Q4_K_M/Q5_K dequant (blocks most models), SIMD matmul (too slow for 3B+), MoE routing, sparse GPU execution.
+
+**Next priority:** Q4_K_M dequantization → SIMD matmul → MoE routing → sparse GPU execution.
