@@ -39,6 +39,15 @@ impl GgufFile {
         self.model.metadata()
     }
 
+    /// Look up a metadata key, trying architecture-specific prefix first, then llama.
+    fn get_config(&self, suffix: &str) -> Option<&Value> {
+        let arch = self.architecture().ok()?;
+        let arch_key = format!("{arch}.{suffix}");
+        self.kv()
+            .get(&arch_key)
+            .or_else(|| self.kv().get(&format!("llama.{suffix}")))
+    }
+
     /// Get model architecture name (e.g., "qwen3", "llama")
     pub fn architecture(&self) -> Result<&str> {
         self.kv()
@@ -61,8 +70,7 @@ impl GgufFile {
 
     /// Get context length
     pub fn context_length(&self) -> Result<usize> {
-        self.kv()
-            .get("llama.context_length")
+        self.get_config("context_length")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .ok_or_else(|| anyhow!("Context length not found"))
@@ -70,8 +78,7 @@ impl GgufFile {
 
     /// Get embedding dimension
     pub fn embedding_length(&self) -> Result<usize> {
-        self.kv()
-            .get("llama.embedding_length")
+        self.get_config("embedding_length")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .ok_or_else(|| anyhow!("Embedding length not found"))
@@ -79,8 +86,7 @@ impl GgufFile {
 
     /// Get number of transformer layers
     pub fn block_count(&self) -> Result<usize> {
-        self.kv()
-            .get("llama.block_count")
+        self.get_config("block_count")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .ok_or_else(|| anyhow!("Block count not found"))
@@ -88,8 +94,7 @@ impl GgufFile {
 
     /// Get number of attention heads
     pub fn attention_head_count(&self) -> Result<usize> {
-        self.kv()
-            .get("llama.attention.head_count")
+        self.get_config("attention.head_count")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .ok_or_else(|| anyhow!("Attention head count not found"))
@@ -97,16 +102,14 @@ impl GgufFile {
 
     /// Get number of key/value heads (for GQA)
     pub fn attention_head_count_kv(&self) -> Option<usize> {
-        self.kv()
-            .get("llama.attention.head_count_kv")
+        self.get_config("attention.head_count_kv")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
     }
 
     /// Get feed forward length (intermediate size)
     pub fn feed_forward_length(&self) -> Result<usize> {
-        self.kv()
-            .get("llama.feed_forward_length")
+        self.get_config("feed_forward_length")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .ok_or_else(|| anyhow!("Feed forward length not found"))
@@ -114,25 +117,19 @@ impl GgufFile {
 
     /// Get RoPE dimension (partial rotary embedding dimension)
     pub fn rope_dim(&self) -> Option<usize> {
-        self.kv()
-            .get("llama.rope.dimension")
+        self.get_config("rope.dimension")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
     }
 
     /// Get MoE configuration (if present)
     pub fn moe_config(&self) -> Option<MoeConfig> {
-        let expert_count = self
-            .kv()
-            .get("llama.expert_count")
-            .and_then(|v| v.as_u64())? as usize;
+        let expert_count = self.get_config("expert_count").and_then(|v| v.as_u64())? as usize;
         let expert_used_count = self
-            .kv()
-            .get("llama.expert_used_count")
+            .get_config("expert_used_count")
             .and_then(|v| v.as_u64())? as usize;
         let expert_intermediate_size = self
-            .kv()
-            .get("llama.expert_feed_forward_length")
+            .get_config("expert_feed_forward_length")
             .and_then(|v| v.as_u64())? as usize;
 
         Some(MoeConfig {

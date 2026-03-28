@@ -88,6 +88,14 @@ name = "powerinfer-serve"
 path = "src/bin/powerinfer-serve.rs"
 required-features = ["server"]
 
+[[bin]]
+name = "real_test"
+path = "src/bin/real_test.rs"
+
+[[bin]]
+name = "gguf_dump"
+path = "src/bin/gguf_dump.rs"
+
 [[bench]]
 name = "benchmark"
 harness = false
