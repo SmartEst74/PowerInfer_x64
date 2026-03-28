@@ -307,8 +307,8 @@ The two techniques are multiplicative:
 
 ### References
 
-- Paper: [arxiv.org/abs/2504.19874](https://arxiv.org/abs/2504.19874)
-- PyTorch reference: [tonbistudio/turboquant-pytorch](https://github.com/tonbistudio/turboquant-pytorch)
+- [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874) (Zandieh, Daliri, Hadian, Mirrokni — ICLR 2026)
+- [PyTorch reference implementation](https://github.com/tonbistudio/turboquant-pytorch) (MIT license)
 
 ## Limitations & Future Work
 
@@ -327,8 +327,26 @@ The two techniques are multiplicative:
 
 ## References
 
-- [Original PowerInfer](https://github.com/tiiny-ai/powerinfer) - Neuron-level sparsity concept
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - GGUF, quantization, backend abstractions
-- [Qwen3.5 Technical Report](https://arxiv.org/abs/2504.1006) - Architecture details
-- [Gated DeltaNet](https://arxiv.org/abs/2406.12843) - Linear attention mechanism
-- [rust-gpu](https://github.com/rust-gpu/rust-gpu) - Rust on GPUs
+### Core Papers
+
+- **PowerInfer**: [Fast Large Language Model Serving with a Consumer-grade GPU](https://arxiv.org/abs/2312.12456) (Song, Mi, Xie, Chen — Shanghai Jiao Tong University, 2023)
+- **PowerInfer-2**: [Fast Large Language Model Inference on a Smartphone](https://arxiv.org/abs/2406.06282) (Song et al., 2024)
+- **TurboQuant**: [Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874) (Zandieh, Daliri, Hadian, Mirrokni — Google Research, ICLR 2026)
+- **QJL**: [1-Bit Quantized JL Transform for KV Cache Quantization](https://arxiv.org/abs/2406.03482) (Zandieh et al., AAAAI 2025)
+- **PolarQuant**: [Quantizing KV Caches with Polar Transformation](https://arxiv.org/abs/2502.02617) (AISTATS 2026)
+
+### Model Architectures
+
+- **Qwen3.5-35B-A3B**: [HuggingFace model page](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) (Alibaba Cloud, 2026) — 35B total params, 3B active (MoE)
+- **Gated DeltaNet**: [Linear Attention with Gating](https://arxiv.org/abs/2406.12843)
+
+### Quality Evaluation
+
+- **Perplexity**: Standard NLP metric (exponentiated cross-entropy). Defined in [Merity et al., "Pointer Sentinel Mixture Models"](https://arxiv.org/abs/1609.07843) (Salesforce, 2016). Used to measure how well a model predicts text — lower is better.
+- **WikiText-103**: Benchmark dataset from [Merity et al.](https://arxiv.org/abs/1609.07843). 103M tokens from English Wikipedia. Available at [paperswithcode.com/dataset/wikitext-103](https://paperswithcode.com/dataset/wikitext-103)
+
+### Tools & Dependencies
+
+- **gguf-rs**: [crates.io/crates/gguf-rs](https://crates.io/crates/gguf-rs) — GGUF file format parser for Rust
+- **llama.cpp**: [github.com/ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) — Reference for GGUF format, quantization schemes, backend abstractions
+- **rust-gpu**: [github.com/rust-gpu/rust-gpu](https://github.com/rust-gpu/rust-gpu) — Compile Rust to GPU shaders (SPIR-V/NVVM)
