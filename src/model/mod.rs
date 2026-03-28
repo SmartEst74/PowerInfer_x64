@@ -126,7 +126,8 @@ impl InferenceContext {
     /// Single forward pass through the model
     ///
     /// Returns logits over the vocabulary for the last position.
-    fn forward(&mut self, tokens: &[u32]) -> Result<Vec<f32>> {
+    /// This is public for benchmarking and profiling use.
+    pub fn forward(&mut self, tokens: &[u32]) -> Result<Vec<f32>> {
         let n_embd = self.config.embedding_length;
         let n_layers = self.config.block_count;
         let n_heads = self.config.attention.head_count;

@@ -22,6 +22,8 @@
 //! # }
 //! ```
 
+pub mod activation;
+pub mod benchmark;
 pub mod gguf;
 pub mod model;
 pub mod ops;
