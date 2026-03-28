@@ -1,5 +1,29 @@
 # AGENTS.md
 
+## Understand Current State First
+
+Before doing any work, run these commands to understand the project:
+
+```bash
+# 1. Verify code health
+cargo test
+cargo clippy --all-targets -- -D warnings
+
+# 2. Read honest quality assessment
+cat QUALITY.md
+
+# 3. Check open issues (what needs doing)
+gh issue list --state open
+
+# 4. Check recent commits (what was just done)
+git log --oneline -10
+
+# 5. Check if real models load
+cargo run --bin gguf_dump -- /home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf
+```
+
+These commands tell you: what works, what's broken, what's planned, and what was just done. Do not proceed with work until you understand the output of all five.
+
 ## Build & Test Commands
 
 ```bash
