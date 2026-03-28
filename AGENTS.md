@@ -131,14 +131,6 @@ cargo run --bin gguf_dump -- /path/to/model.gguf
   ```
 - The project uses `nightly-2025-06-23` toolchain (for rust-gpu)
 
-## Current State (2026-03-28)
-
-**Working:** GGUF parsing, all dequant (Q4_0 through Q6_K), forward pass (functional, SIMD accelerated), BPE tokenizer, TurboQuant KV cache compression, activation profiler, system resource detector, Prometheus metrics, CI/CD pipeline. 66 tests pass, 0 clippy warnings.
-
-**Not working:** CUDA GPU execution (detected 2x GTX 1050 Ti but no kernels), sparse GPU execution, quality validation against reference.
-
-**Next priority:** CUDA kernels → forward pass validation → coherent output → sparse GPU execution.
-
 ## Quality Gates (L5 Architect + Uncle Bob Standards)
 
 Before claiming any work is done, verify ALL of the following:
