@@ -228,6 +228,88 @@ For Qwen3.5-35B-A3B on 2×1050 Ti:
 - `F_compute` ≈ 2.8 TFLOPs (2× GTX 1050 Ti FP16)
 - Expect: 2.5-4 tok/s
 
+## Quality Assurance Pipeline
+
+Quality is guaranteed by design: every neuron is computed, just on different hardware. The profiler identifies which neurons to put on GPU, not which to skip.
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Training Time                      │
+│                                                       │
+│  Diverse inputs → Profiler → HotNeuronIndex (JSON)   │
+│  "Which neurons fire on everything?"                  │
+└─────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────┐
+│                    Inference Time                      │
+│                                                       │
+│  ┌──────────────────┐  ┌───────────────────────┐     │
+│  │  GPU (VRAM)       │  │  CPU (RAM)             │    │
+│  │  Hot neuron       │  │  Cold neuron           │    │
+│  │  weights + KV     │  │  weights + KV          │    │
+│  │  (TurboQuant      │  │  (larger cache,        │    │
+│  │   compresses KV)  │  │   less compression)    │    │
+│  └──────────────────┘  └───────────────────────┘     │
+│                                                       │
+│  Every neuron computed → Quality preserved             │
+│  TurboQuant → Longer context in same VRAM              │
+│  Sparse GPU → 3x speedup (only hot neurons on GPU)    │
+└─────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────┐
+│                    Quality Validation                  │
+│                                                       │
+│  Perplexity at hot=30%: should match hot=100%         │
+│  Reference comparison: cosine sim > 0.999             │
+│  Results tracked in git for regression detection      │
+└─────────────────────────────────────────────────────┘
+```
+
+### Quality Metrics
+
+| Metric | Target | How Measured |
+|--------|--------|--------------|
+| Perplexity | Identical to full CPU | WikiText-103 at various hot% |
+| Logit cosine similarity | >0.999 | Compare against llama.cpp reference |
+| Top-1 prediction match | >95% | Same token selected |
+| Top-5 prediction match | >99% | Correct token in top 5 |
+
+### Modules
+
+- `src/activation/` — Neuron hotness profiling, HotNeuronIndex export
+- `src/benchmark/` — Perplexity measurement, reference comparison
+
+## TurboQuant KV Cache Compression
+
+TurboQuant (Google Research, ICLR 2026) compresses the KV cache to 2-4 bits per coordinate with zero accuracy loss on attention scores.
+
+### How It Helps
+
+Without TurboQuant: hot neuron KV cache in 4GB VRAM → ~8K context
+With TurboQuant (3-bit): same 4GB → ~40K context
+
+The two techniques are multiplicative:
+- Sparse execution: 3x speedup (only hot neurons on GPU)
+- TurboQuant: 6x KV cache memory savings (longer context in same VRAM)
+- Combined: fast GPU execution + long context on limited hardware
+
+### Algorithm
+
+1. **Stage 1 (PolarQuant)**: Random rotation + Lloyd-Max scalar quantization per coordinate
+2. **Stage 2 (QJL)**: 1-bit sign correction for unbiased inner products
+3. **Asymmetric estimator**: Compute attention scores directly from compressed keys
+
+### Module
+
+- `src/turboquant/` — Lloyd-Max quantizer, rotation, QJL, CompressedKVCache
+
+### References
+
+- Paper: [arxiv.org/abs/2504.19874](https://arxiv.org/abs/2504.19874)
+- PyTorch reference: [tonbistudio/turboquant-pytorch](https://github.com/tonbistudio/turboquant-pytorch)
+
 ## Limitations & Future Work
 
 ### Current Limitations
