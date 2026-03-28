@@ -29,6 +29,7 @@ pub mod model;
 pub mod ops;
 pub mod quant;
 pub mod runtime;
+pub mod sysinfo;
 pub mod tokenizer;
 pub mod turboquant;
 pub mod weights;

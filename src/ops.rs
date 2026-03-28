@@ -112,7 +112,18 @@ pub fn elem_add(out: &mut [f32], a: &[f32], b: &[f32]) {
 
 /// Matrix-vector multiplication: y = x @ w (row-major w)
 pub fn matvec(y: &mut [f32], x: &[f32], w: &[f32], n_out: usize, n_in: usize) {
-    crate::quant::matvec_f32(y, x, w, n_out, n_in);
+    let w_len = w.len();
+    for (i, yi) in y.iter_mut().enumerate().take(n_out) {
+        let mut sum = 0.0f32;
+        let row_offset = i * n_in;
+        if row_offset + n_in > w_len {
+            break;
+        }
+        for j in 0..n_in {
+            sum += x[j] * w[row_offset + j];
+        }
+        *yi = sum;
+    }
 }
 
 /// Scaled dot-product attention for a single head (causal mask)

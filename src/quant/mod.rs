@@ -590,9 +590,13 @@ fn dequantize_q6_k(data: &[u8], rows: usize, cols: usize) -> Result<Vec<f32>> {
 /// Matrix-vector multiplication: y = x @ w
 /// where x is [n_in], w is [n_out, n_in] (row-major), y is [n_out]
 pub fn matvec_f32(y: &mut [f32], x: &[f32], w: &[f32], n_out: usize, n_in: usize) {
+    let w_len = w.len();
     for (i, yi) in y.iter_mut().enumerate().take(n_out) {
         let mut sum = 0.0f32;
         let row_offset = i * n_in;
+        if row_offset + n_in > w_len {
+            break;
+        }
         for j in 0..n_in {
             sum += x[j] * w[row_offset + j];
         }

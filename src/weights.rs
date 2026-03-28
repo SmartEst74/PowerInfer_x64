@@ -130,17 +130,25 @@ fn read_tensor_data(
             let vals_per_block = qtype.values_per_block();
             let total_blocks = total_elements.div_ceil(vals_per_block);
             let bytes_needed = total_blocks * block_size;
+
+            // Read what's available (GGUF data might be slightly smaller)
             let mut buf = vec![0u8; bytes_needed];
-            reader.read_exact(&mut buf)?;
+            let actual_read = reader.read(&mut buf)?;
+            buf.truncate(actual_read);
 
             // For quantized types, dequantize in chunks matching the block layout
             let rows = 1;
             let cols = (total_elements / vals_per_block) * vals_per_block;
-            if cols == total_elements {
+            if cols == total_elements && actual_read >= bytes_needed {
                 quant::dequantize(&buf, qtype, rows, cols)
             } else {
                 // Handle remainder elements as zeros
-                let mut result = quant::dequantize(&buf, qtype, rows, cols)?;
+                let dequant_cols = (actual_read / block_size) * vals_per_block;
+                let mut result = if dequant_cols > 0 {
+                    quant::dequantize(&buf, qtype, rows, dequant_cols)?
+                } else {
+                    Vec::new()
+                };
                 result.resize(total_elements, 0.0);
                 Ok(result)
             }
