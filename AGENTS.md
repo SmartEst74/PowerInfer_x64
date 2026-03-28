@@ -133,8 +133,33 @@ cargo run --bin gguf_dump -- /path/to/model.gguf
 
 ## Current State (2026-03-28)
 
-**Working:** GGUF parsing, Q8_0/Q4_0/Q5_0/Q5_1/F32/F16 dequant, forward pass (functional, slow), BPE tokenizer, TurboQuant algorithm, activation profiler, Prometheus metrics, CI/CD pipeline. 51 tests pass, 0 clippy warnings.
+**Working:** GGUF parsing, all dequant (Q4_0 through Q6_K), forward pass (functional, SIMD accelerated), BPE tokenizer, TurboQuant KV cache compression, activation profiler, system resource detector, Prometheus metrics, CI/CD pipeline. 66 tests pass, 0 clippy warnings.
 
-**Not working:** Q4_K_M/Q5_K dequant (blocks most models), SIMD matmul (too slow for 3B+), MoE routing, sparse GPU execution.
+**Not working:** CUDA GPU execution (detected 2x GTX 1050 Ti but no kernels), sparse GPU execution, quality validation against reference.
 
-**Next priority:** Q4_K_M dequantization → SIMD matmul → MoE routing → sparse GPU execution.
+**Next priority:** CUDA kernels → forward pass validation → coherent output → sparse GPU execution.
+
+## Quality Gates (L5 Architect + Uncle Bob Standards)
+
+Before claiming any work is done, verify ALL of the following:
+
+### Uncle Bob (Clean Code)
+- [ ] Tests verify USER-FACING BEHAVIOR, not just internal math
+- [ ] Every public function has a test that would fail if the function broke
+- [ ] No dead code (clippy -D warnings must pass)
+- [ ] Functions do one thing (no 100-line functions)
+- [ ] Test names describe WHAT the user gets, not HOW it works
+
+### L5 Architect (Production Quality)
+- [ ] Integration test against a REAL model file (not synthetic data)
+- [ ] Performance benchmarked (tok/s tracked in QUALITY.md)
+- [ ] QUALITY.md updated with honest results (what works AND what doesn't)
+- [ ] Issues tracked: completed work closed, new work has an open issue
+- [ ] No claim of "working" without end-to-end proof
+
+### The "Would Uncle Bob Approve?" Checklist
+Before committing, ask:
+1. Could a new developer understand this code in 10 minutes? → If no, refactor
+2. Does the test PROVE the feature works for the user? → If no, add acceptance test
+3. Would I be embarrassed showing this to a senior engineer? → If yes, fix it
+4. Is there an open issue for what I'm about to do next? → If no, create one
