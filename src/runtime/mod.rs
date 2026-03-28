@@ -135,6 +135,12 @@ impl CpuBackend {
     }
 }
 
+impl Default for CpuBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Backend for CpuBackend {
     fn name(&self) -> &str {
         &self.name
@@ -201,15 +207,15 @@ impl Backend for CpuBackend {
 // Placeholder CUDA backend
 pub struct CudaBackend {
     name: String,
+    #[allow(dead_code)]
     device_id: usize,
-    // CUDA-specific handles
 }
 
 impl CudaBackend {
     pub fn new(device_id: usize) -> Result<Self, BackendError> {
         // Check CUDA available, get device properties
         Ok(Self {
-            name: format!("CUDA:{}", device_id),
+            name: format!("CUDA:{device_id}"),
             device_id,
         })
     }

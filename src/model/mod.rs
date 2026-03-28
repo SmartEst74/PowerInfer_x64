@@ -57,7 +57,7 @@ impl InferenceContext {
         // TODO: Prefill: run forward pass on entire prompt
         // TODO: Decoding loop: sample next token, append, repeat
         // TODO: Use backend for all tensor operations
-        Ok(format!("Generated text for: {}", prompt))
+        Ok(format!("Generated text for: {prompt}"))
     }
 
     /// Get model configuration
@@ -73,7 +73,6 @@ impl InferenceContext {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_model_config_parsing() {

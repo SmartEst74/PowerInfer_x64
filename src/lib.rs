@@ -29,6 +29,8 @@ pub mod runtime;
 #[cfg(feature = "predictor")]
 pub mod predictor;
 #[cfg(feature = "server")]
+pub mod metrics;
+#[cfg(feature = "server")]
 pub mod server;
 pub mod tokenizer;
 

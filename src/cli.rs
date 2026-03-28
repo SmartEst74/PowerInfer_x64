@@ -35,15 +35,15 @@ enum Commands {
 
         /// Path to hot neuron index (optional)
         #[arg(long)]
-        hot_index: Option<PathBuf>,
+        _hot_index: Option<PathBuf>,
 
         /// Temperature for sampling
         #[arg(long, default_value_t = 0.7)]
-        temperature: f32,
+        _temperature: f32,
 
         /// Threads for CPU parallelization
         #[arg(short, long, default_value_t = num_cpus::get())]
-        threads: usize,
+        _threads: usize,
     },
 
     /// Profile activations to build hot neuron index
@@ -67,12 +67,11 @@ enum Commands {
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
         #[arg(long)]
-        hot_index: Option<PathBuf>,
+        _hot_index: Option<PathBuf>,
     },
 }
 
 fn main() -> anyhow::Result<()> {
-    // Initialize logging
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
@@ -83,13 +82,12 @@ fn main() -> anyhow::Result<()> {
             ref prompt,
             n,
             gpu_layers,
-            ref hot_index,
-            temperature,
-            threads,
+            _hot_index: _,
+            _temperature: _,
+            _threads: _,
         } => {
             if let Some(prompt) = prompt {
-                eprintln!("Loading model: {:?}", model);
-                // TODO: Implement actual generation
+                eprintln!("Loading model: {model:?}");
                 let backend = if gpu_layers > 0 {
                     #[cfg(feature = "cuda")]
                     {
@@ -106,7 +104,7 @@ fn main() -> anyhow::Result<()> {
 
                 let mut ctx = powerinfer::model::InferenceContext::from_gguf(model, backend)?;
                 let output = ctx.generate(prompt, n)?;
-                println!("{}", output);
+                println!("{output}");
             } else {
                 eprintln!("Error: prompt is required");
                 std::process::exit(1);
@@ -118,32 +116,29 @@ fn main() -> anyhow::Result<()> {
             ref prompts,
             samples,
         } => {
-            eprintln!("Profiling model: {:?}", model);
-            eprintln!("Output: {:?}", output);
-            eprintln!("Prompts: {:?}", prompts);
-            eprintln!("Samples: {}", samples);
-            // TODO: call profiler
+            eprintln!("Profiling model: {model:?}");
+            eprintln!("Output: {output:?}");
+            eprintln!("Prompts: {prompts:?}");
+            eprintln!("Samples: {samples}");
             eprintln!("Profiler not yet implemented");
         }
         Commands::Serve {
             ref model,
             port,
             concurrency,
-            ref hot_index,
+            _hot_index: _,
         } => {
             #[cfg(not(feature = "server"))]
             {
+                let _ = (model, port, concurrency);
                 eprintln!("Error: server feature not enabled. Rebuild with --features server");
                 std::process::exit(1);
             }
             #[cfg(feature = "server")]
             {
-                eprintln!("Starting server on port {}", port);
-                eprintln!("Model: {:?}", model);
-                eprintln!("Concurrency: {}", concurrency);
-                if let Some(idx) = hot_index {
-                    eprintln!("Hot index: {:?}", idx);
-                }
+                eprintln!("Starting server on port {port}");
+                eprintln!("Model: {model:?}");
+                eprintln!("Concurrency: {concurrency}");
                 use powerinfer::server::{serve, ServerConfig};
                 let config = ServerConfig {
                     host: "0.0.0.0".to_string(),

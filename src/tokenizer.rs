@@ -13,10 +13,12 @@ pub struct Tokenizer {
     /// Token ID → string
     vocab: Vec<String>,
     /// Pair of token IDs → merged token ID
+    #[allow(dead_code)]
     merges: HashMap<(u32, u32), u32>,
     /// Special token IDs
     bos_token_id: Option<u32>,
     eos_token_id: Option<u32>,
+    #[allow(dead_code)]
     pad_token_id: Option<u32>,
 }
 
@@ -33,7 +35,7 @@ impl Tokenizer {
         // For now, placeholder
         let mut vocab = Vec::with_capacity(token_count);
         for i in 0..token_count {
-            vocab.push(format!("<token_{}>", i));
+            vocab.push(format!("<token_{i}>"));
         }
 
         // Load merges if present
@@ -102,8 +104,6 @@ impl Tokenizer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_tokenizer_basic() {
         // Will test with actual GGUF

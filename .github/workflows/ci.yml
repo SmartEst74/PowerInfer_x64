@@ -11,9 +11,43 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-06-23
+          components: rust-src,rustc-dev,llvm-tools-preview,rustfmt,clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy (no features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (server feature)
+        run: cargo clippy --all-targets --features server -- -D warnings
+
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: lint
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,37 +65,28 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Build (CPU only)
-        run: cargo build --release --all-targets
+            ${{ runner.os }}-cargo-test-
 
       - name: Run tests
-        run: cargo test --release -- --nocapture
+        run: cargo test -- --nocapture
 
-      - name: Run clippy
-        run: cargo clippy --release --all-targets -- -D warnings
+      - name: Run doc tests
+        run: cargo test --doc
 
-  # CUDA job disabled until rust-gpu kernels are implemented
-  # cuda:
-  #   name: CUDA Build
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Install CUDA
-  #       uses: Jimver/cuda-toolkit@v0
-  #       with:
-  #         cuda: '11.8.0'
-  #     - name: Install rust-gpu
-  #       run: |
-  #         cargo install --git https://github.com/rust-gpu/rust-gpu.git --rev main rust-gpu
-  #         cargo install --git https://github.com/rust-gpu/rust-gpu.git --rev main rustc_codegen_nvvm
-  #     - name: Build with CUDA
-  #       run: cargo build --release --features cuda
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
 
   benchmark:
     name: Benchmark
@@ -78,16 +103,16 @@ jobs:
           toolchain: nightly-2025-06-23
           components: rust-src,rustc-dev,llvm-tools-preview
 
-      - name: Cache
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-bench-
 
       - name: Build benchmark binary
         run: cargo build --release --benches
@@ -102,3 +127,4 @@ jobs:
         with:
           name: benchmark-results
           path: bench_results.json
+          retention-days: 30

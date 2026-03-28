@@ -61,7 +61,7 @@ impl QuantizationType {
             G::IQ4_NL => Ok(Self::IQ4_NL),
             G::IQ4_XS => Ok(Self::IQ4_XS),
             G::BF16 => Ok(Self::F16),
-            other => Err(anyhow!("Unsupported GGML type: {:?}", other)),
+            other => Err(anyhow!("Unsupported GGML type: {other:?}")),
         }
     }
 }
@@ -93,7 +93,6 @@ pub fn sparse_matmul_hot(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[test]
     fn test_dequant_q4_0() {
         // Will test against reference

@@ -1,6 +1,6 @@
 //! OpenAI-compatible HTTP API server
 //!
-//! Provides /v1/completions and /v1/chat/completions endpoints
+//! Provides /v1/completions, /v1/chat/completions, /v1/models, /health, and /metrics endpoints
 //! using Axum and Tokio.
 
 use axum::{
@@ -15,12 +15,16 @@ use tower_http::cors::{CorsLayer, Any};
 use tracing::info;
 
 use crate::InferenceContext;
+use crate::metrics::{Metrics, SharedMetrics};
 
 /// Application state shared across requests
+#[derive(Clone)]
 pub struct AppState {
     pub model: Arc<RwLock<Arc<InferenceContext>>>,
     pub max_concurrent: usize,
     pub semaphore: Arc<Semaphore>,
+    pub metrics: SharedMetrics,
+    pub start_epoch: u64,
 }
 
 /// Server configuration
@@ -109,6 +113,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/v1/models", get(handle_list_models))
         .route("/health", get(handle_health))
+        .route("/metrics", get(handle_metrics))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(state)
 }
@@ -126,6 +131,14 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
         ctx.config().block_count
     );
 
+    let metrics = Arc::new(Metrics::new());
+    let model_name = ctx.config().name.clone().unwrap_or_else(|| "unknown".to_string());
+    metrics.model_info.with_label_values(&[
+        &model_name,
+        &ctx.config().arch,
+        &format!("{:?}", ctx.config().quantization),
+    ]).set(1);
+
     let ctx = Arc::new(RwLock::new(Arc::new(ctx)));
     let max_concurrent = if config.max_concurrent == 0 {
         1
@@ -138,12 +151,14 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
         model: ctx,
         max_concurrent,
         semaphore,
+        metrics,
+        start_epoch: chrono::Utc::now().timestamp() as u64,
     };
 
     let router = build_router(state);
-    let addr = format!("{}:{}", config.host, config.port).parse()?;
+    let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
 
-    info!("PowerInfer_x64 server listening on http://{}", addr);
+    info!("PowerInfer_x64 server listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, router).await?;
 
@@ -155,7 +170,12 @@ async fn handle_completions(
     State(state): State<AppState>,
     Json(req): Json<CompletionRequest>,
 ) -> Result<Json<CompletionResponse>, ApiError> {
+    let timer = state.metrics.inference_duration_seconds
+        .with_label_values(&["completions"])
+        .start_timer();
+
     let _permit = state.semaphore.clone().acquire_owned().await?;
+    state.metrics.queue_depth.dec();
 
     let _model = state.model.read().await;
     let text = format!("[DUMMY] Response to: {}", req.prompt);
@@ -173,6 +193,16 @@ async fn handle_completions(
         }],
     };
 
+    let tokens = resp.choices.first().map_or(0, |c| c.text.split_whitespace().count());
+    state.metrics.tokens_generated_total
+        .with_label_values(&["unknown"])
+        .inc_by(tokens as u64);
+
+    timer.observe_duration();
+    state.metrics.inference_requests_total
+        .with_label_values(&["completions", "200"])
+        .inc();
+
     Ok(Json(resp))
 }
 
@@ -181,7 +211,12 @@ async fn handle_chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Json<CompletionResponse>, ApiError> {
+    let timer = state.metrics.inference_duration_seconds
+        .with_label_values(&["chat"])
+        .start_timer();
+
     let _permit = state.semaphore.clone().acquire_owned().await?;
+    state.metrics.queue_depth.dec();
 
     let prompt = req
         .messages
@@ -190,7 +225,7 @@ async fn handle_chat_completions(
         .collect::<String>();
 
     let _model = state.model.read().await;
-    let text = format!("[DUMMY CHAT] Reply to: {}", prompt);
+    let text = format!("[DUMMY CHAT] Reply to: {prompt}");
 
     let resp = CompletionResponse {
         id: "chatcmpl-123".to_string(),
@@ -204,6 +239,16 @@ async fn handle_chat_completions(
             finish_reason: "stop".to_string(),
         }],
     };
+
+    let tokens = resp.choices.first().map_or(0, |c| c.text.split_whitespace().count());
+    state.metrics.tokens_generated_total
+        .with_label_values(&["unknown"])
+        .inc_by(tokens as u64);
+
+    timer.observe_duration();
+    state.metrics.inference_requests_total
+        .with_label_values(&["chat", "200"])
+        .inc();
 
     Ok(Json(resp))
 }
@@ -228,6 +273,18 @@ async fn handle_list_models(
 /// Health check
 async fn handle_health() -> &'static str {
     "OK"
+}
+
+/// Handle /metrics - Prometheus exposition format
+async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let uptime = chrono::Utc::now().timestamp() as u64 - state.start_epoch;
+    state.metrics.uptime_seconds.set(uptime as i64);
+    let body = state.metrics.gather();
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
 }
 
 #[cfg(test)]

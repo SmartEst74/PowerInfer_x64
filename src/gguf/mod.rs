@@ -211,7 +211,6 @@ pub struct MoeConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_load_gguf() {
