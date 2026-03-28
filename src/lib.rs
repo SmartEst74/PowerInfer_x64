@@ -28,6 +28,7 @@ pub mod ops;
 pub mod quant;
 pub mod runtime;
 pub mod tokenizer;
+pub mod turboquant;
 pub mod weights;
 #[cfg(feature = "predictor")]
 pub mod predictor;
