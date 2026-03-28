@@ -166,6 +166,24 @@ Before claiming any work is done, verify ALL of the following:
 - [ ] Functions do one thing (no 100-line functions)
 - [ ] Test names describe WHAT the user gets, not HOW it works
 
+### TDD (Test-Driven Development)
+- [ ] Write the test BEFORE the implementation
+- [ ] Red → Green → Refactor: test fails first, then make it pass
+- [ ] The test must prove the feature works end-to-end (not just compiles)
+- [ ] Every bug fix starts with a test that reproduces the bug
+
+### DRY (Don't Repeat Yourself)
+- [ ] No copy-pasted code across files — extract to shared module
+- [ ] Use existing ops (matvec, rms_norm) instead of reimplementing
+- [ ] If you write the same pattern twice, create a helper
+- [ ] Check neighboring files before adding new utilities
+
+### YAGNI (You Aren't Gonna Need It)
+- [ ] Don't add fields, functions, or modules until they're used
+- [ ] Don't implement features without an open GitHub issue
+- [ ] Don't optimize before measuring (no premature optimization)
+- [ ] Don't add abstractions for hypothetical future use cases
+
 ### L5 Architect (Production Quality)
 - [ ] Integration test against a REAL model file (not synthetic data)
 - [ ] Performance benchmarked (tok/s tracked in QUALITY.md)
