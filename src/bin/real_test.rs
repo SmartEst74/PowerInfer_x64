@@ -106,7 +106,7 @@ fn main() -> anyhow::Result<()> {
         Ok(output) => {
             let elapsed = start.elapsed().as_secs_f64();
             println!("  Output: \"{output}\"");
-            println!("  Time: {:.2}s", elapsed);
+            println!("  Time: {elapsed:.2}s");
             println!();
             println!("=== SUCCESS ===");
             println!("Model loaded, inference ran, output produced.");
