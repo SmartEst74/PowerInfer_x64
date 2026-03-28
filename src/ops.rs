@@ -14,17 +14,15 @@ pub fn rms_norm(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
     debug_assert_eq!(out.len(), x.len());
     debug_assert_eq!(x.len(), weight.len());
 
-    // Compute RMS
-    let mut sum_sq = 0.0f32;
-    for &v in x {
-        sum_sq += v * v;
-    }
+    // Compute RMS using SIMD sum of squares
+    let sum_sq = crate::simd::sum_squares(x);
     let rms = (sum_sq / x.len() as f32 + eps).sqrt();
     let inv_rms = 1.0 / rms;
 
-    // Normalize and scale
-    for i in 0..x.len() {
-        out[i] = x[i] * inv_rms * weight[i];
+    // Normalize (scale) into out, then multiply by weight
+    crate::simd::scale(out, x, inv_rms);
+    for i in 0..out.len() {
+        out[i] *= weight[i];
     }
 }
 
@@ -96,34 +94,19 @@ pub fn silu(x: &mut [f32]) {
 pub fn elem_mul(out: &mut [f32], a: &[f32], b: &[f32]) {
     debug_assert_eq!(out.len(), a.len());
     debug_assert_eq!(out.len(), b.len());
-    for i in 0..out.len() {
-        out[i] = a[i] * b[i];
-    }
+    crate::simd::elem_mul(out, a, b);
 }
 
 /// Element-wise addition of two slices
 pub fn elem_add(out: &mut [f32], a: &[f32], b: &[f32]) {
     debug_assert_eq!(out.len(), a.len());
     debug_assert_eq!(out.len(), b.len());
-    for i in 0..out.len() {
-        out[i] = a[i] + b[i];
-    }
+    crate::simd::elem_add(out, a, b);
 }
 
 /// Matrix-vector multiplication: y = x @ w (row-major w)
 pub fn matvec(y: &mut [f32], x: &[f32], w: &[f32], n_out: usize, n_in: usize) {
-    let w_len = w.len();
-    for (i, yi) in y.iter_mut().enumerate().take(n_out) {
-        let mut sum = 0.0f32;
-        let row_offset = i * n_in;
-        if row_offset + n_in > w_len {
-            break;
-        }
-        for j in 0..n_in {
-            sum += x[j] * w[row_offset + j];
-        }
-        *yi = sum;
-    }
+    crate::simd::matvec(y, x, w, n_out, n_in);
 }
 
 /// Scaled dot-product attention for a single head (causal mask)
