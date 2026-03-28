@@ -24,15 +24,17 @@
 
 pub mod gguf;
 pub mod model;
+pub mod ops;
 pub mod quant;
 pub mod runtime;
+pub mod tokenizer;
+pub mod weights;
 #[cfg(feature = "predictor")]
 pub mod predictor;
 #[cfg(feature = "server")]
 pub mod metrics;
 #[cfg(feature = "server")]
 pub mod server;
-pub mod tokenizer;
 
 // Re-exports
 pub use gguf::GgufFile;
