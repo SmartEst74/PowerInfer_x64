@@ -40,17 +40,29 @@ pub struct ModelConfig {
     pub rope_freq_base: f32,
 }
 
+use crate::turboquant::CompressedKVCache;
+
 /// KV cache for a single layer
+/// Supports both f32 (default) and TurboQuant compressed (opt-in)
 struct LayerCache {
-    key_cache: Vec<f32>,   // [seq_len * n_heads * head_dim]
-    value_cache: Vec<f32>, // [seq_len * n_heads * head_dim]
+    /// F32 key cache [seq_len * n_kv_heads * head_dim]
+    key_cache: Vec<f32>,
+    /// F32 value cache [seq_len * n_kv_heads * head_dim]
+    value_cache: Vec<f32>,
+    /// TurboQuant compressed KV cache (optional)
+    compressed: Option<CompressedKVCache>,
 }
 
 impl LayerCache {
-    fn new() -> Self {
+    fn new(compressed: bool, n_kv_heads: usize, head_dim: usize, seed: u64) -> Self {
         Self {
             key_cache: Vec::new(),
             value_cache: Vec::new(),
+            compressed: if compressed {
+                Some(CompressedKVCache::new(n_kv_heads, head_dim, 3, 3, seed))
+            } else {
+                None
+            },
         }
     }
 
@@ -71,6 +83,8 @@ pub struct InferenceContext {
     weights: Weights,
     tokenizer: Tokenizer,
     layer_caches: Vec<LayerCache>,
+    /// Use TurboQuant compressed KV cache
+    use_compressed_cache: bool,
 }
 
 impl InferenceContext {
@@ -81,7 +95,16 @@ impl InferenceContext {
         let tokenizer = Tokenizer::from_gguf(&gguf)?;
         let weights = Weights::from_gguf(&gguf)?;
 
-        let layer_caches = (0..config.block_count).map(|_| LayerCache::new()).collect();
+        let n_kv_heads = config
+            .attention
+            .head_count_kv
+            .unwrap_or(config.attention.head_count);
+        let head_dim = config.attention.head_dim;
+        let use_compressed = false; // Default: f32 cache. Set true for TurboQuant.
+
+        let layer_caches = (0..config.block_count)
+            .map(|i| LayerCache::new(use_compressed, n_kv_heads, head_dim, i as u64))
+            .collect();
 
         Ok(Self {
             config,
@@ -89,6 +112,7 @@ impl InferenceContext {
             weights,
             tokenizer,
             layer_caches,
+            use_compressed_cache: use_compressed,
         })
     }
 
@@ -264,6 +288,11 @@ impl InferenceContext {
                 cache.key_cache.extend_from_slice(&k);
                 cache.value_cache.extend_from_slice(&v);
 
+                // Also append to compressed cache if enabled
+                if let Some(ref mut compressed) = cache.compressed {
+                    compressed.append(&k, &v);
+                }
+
                 // Attention per head
                 let total_seq_len = prev_seq_len + pos + 1;
                 let mut attn_out = vec![0.0f32; n_heads * head_dim];
@@ -389,11 +418,55 @@ impl InferenceContext {
         &self.weights
     }
 
+    /// Enable TurboQuant compressed KV cache
+    /// Call before generation. Existing caches are cleared.
+    pub fn enable_compressed_cache(&mut self) {
+        if self.use_compressed_cache {
+            return;
+        }
+        let n_kv_heads = self
+            .config
+            .attention
+            .head_count_kv
+            .unwrap_or(self.config.attention.head_count);
+        let head_dim = self.config.attention.head_dim;
+        self.layer_caches = (0..self.config.block_count)
+            .map(|i| LayerCache::new(true, n_kv_heads, head_dim, i as u64))
+            .collect();
+        self.use_compressed_cache = true;
+    }
+
+    /// Get KV cache memory usage (f32 bytes)
+    pub fn kv_cache_memory_bytes(&self) -> usize {
+        self.layer_caches
+            .iter()
+            .map(|c| (c.key_cache.len() + c.value_cache.len()) * 4)
+            .sum()
+    }
+
+    /// Get compressed KV cache memory usage (if enabled)
+    pub fn compressed_cache_memory_bytes(&self) -> usize {
+        self.layer_caches
+            .iter()
+            .filter_map(|c| c.compressed.as_ref().map(|cc| cc.memory_bytes()))
+            .sum()
+    }
+
     /// Reset KV caches
     pub fn reset(&mut self) {
-        for cache in &mut self.layer_caches {
+        let n_kv_heads = self
+            .config
+            .attention
+            .head_count_kv
+            .unwrap_or(self.config.attention.head_count);
+        let head_dim = self.config.attention.head_dim;
+        for (i, cache) in self.layer_caches.iter_mut().enumerate() {
             cache.key_cache.clear();
             cache.value_cache.clear();
+            if self.use_compressed_cache {
+                cache.compressed =
+                    Some(CompressedKVCache::new(n_kv_heads, head_dim, 3, 3, i as u64));
+            }
         }
     }
 }
