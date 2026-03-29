@@ -83,7 +83,7 @@ impl QuantizationType {
             Self::Q4_K_S | Self::Q4_K_M => 144,
             Self::Q5_K_S | Self::Q5_K_M => 176,
             Self::Q6_K => 212,
-            _ => 0,
+            other => panic!("block_size_bytes not defined for {other:?}"),
         }
     }
 
@@ -99,7 +99,7 @@ impl QuantizationType {
             Self::Q4_K_S | Self::Q4_K_M => 256,
             Self::Q5_K_S | Self::Q5_K_M => 256,
             Self::Q6_K => 256,
-            _ => 32,
+            other => panic!("values_per_block not defined for {other:?}"),
         }
     }
 }

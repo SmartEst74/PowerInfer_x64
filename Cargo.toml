@@ -15,7 +15,6 @@ gguf-rs = "0.1"
 
 # Numeric types
 half = "2.4"
-byteorder = "1.5"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -33,28 +32,20 @@ prometheus = { version = "0.13", optional = true }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
-# Parallelism
-rayon = { version = "1.8", optional = true }
-
 # Linear algebra (predictor training)
 ndarray = { version = "0.16", optional = true }
 rand = { version = "0.8", optional = true }
 
 # Utilities
 clap = { version = "4.5", features = ["derive"] }
-comfy-table = "7.1"
-memmap2 = { version = "0.9", optional = true }
-bytemuck = "1.14"
-chrono = { version = "0.4", features = ["serde"] }  # For timestamps
-num_cpus = "1.16"  # For default thread count
-regex = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
+num_cpus = "1.16"
 
 # GPU backends (optional)
 cust = { version = "0.3", optional = true }
 ash = { version = "0.38", optional = true }
 
 [build-dependencies]
-# rust-gpu will be added when GPU kernel compilation is implemented
 
 [dev-dependencies]
 criterion = "0.5"
@@ -65,7 +56,7 @@ cpu = []
 cuda = ["dep:cust"]
 vulkan = ["dep:ash"]
 server = ["dep:axum", "dep:tower-http", "dep:prometheus", "tokio/rt-multi-thread"]
-profiling = ["rayon", "memmap2"]
+profiling = []
 predictor = ["ndarray", "rand"]
 all = ["cpu", "cuda", "vulkan", "server", "profiling", "predictor"]
 

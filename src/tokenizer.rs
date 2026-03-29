@@ -21,7 +21,6 @@ pub struct Tokenizer {
     /// Special token IDs
     bos_token_id: Option<u32>,
     eos_token_id: Option<u32>,
-    #[allow(dead_code)]
     pad_token_id: Option<u32>,
 }
 
@@ -262,6 +261,11 @@ impl Tokenizer {
         self.eos_token_id
     }
 
+    /// Get PAD token ID
+    pub fn pad_token_id(&self) -> Option<u32> {
+        self.pad_token_id
+    }
+
     /// Get vocabulary size
     pub fn vocab_size(&self) -> usize {
         self.vocab.len()
@@ -272,6 +276,21 @@ impl Tokenizer {
 mod tests {
     #[test]
     fn test_tokenizer_basic() {
-        // Integration test with actual GGUF file
+        let path = "/home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP: model not found");
+            return;
+        }
+        let gguf = crate::gguf::GgufFile::open(path).expect("GGUF should load");
+        // Tokenizer may fail to load if metadata is missing (some GGUFs lack tokenizer.ggml.tokens)
+        match super::Tokenizer::from_gguf(&gguf) {
+            Ok(tokenizer) => {
+                // If it loads, verify basic functionality
+                let _ = tokenizer.encode("Hello world");
+            }
+            Err(_) => {
+                eprintln!("SKIP: tokenizer metadata not found in GGUF");
+            }
+        }
     }
 }

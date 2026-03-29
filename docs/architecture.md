@@ -25,7 +25,7 @@ Then we can fit models far larger than GPU memory would normally allow.
 ┌─────────────────────────────────────────────────────────────┐
 │                     Rust Runtime Layer                     │
 ├─────────────────────────────────────────────────────────────┤
-│  Model Loader │ Scheduler │ Predictor │ Neuron Cache │ etc │
+│  Model Loader │ Weight Loader │ Tokenizer │ Profiler (stub) │
 └───────────────────────────────────┬─────────────────────────┘
                                     │
                                     ▼
@@ -37,9 +37,9 @@ Then we can fit models far larger than GPU memory would normally allow.
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│           GPU Kernels (Rust via rust-gpu)                  │
+│           GPU Kernels (CUDA PTX inline, cust bindings)      │
 ├─────────────────────────────────────────────────────────────┤
-│  SparseMatMul │ FusedOps │ MoERouter │ DeltaNet          │
+│  MatVec (PTX) │ ... more kernels planned                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,15 +79,14 @@ A tiny MLP trained to predict hot neurons from current context.
 
 The predictor is **architecture-specific** and will be pre-trained for Qwen3.5 models, bundled with release.
 
-### 4. Neuron Cache & Scheduler
+### 4. Neuron Cache & Scheduler (PLANNED — not yet implemented)
 
-**Neuron Cache**:
+**Neuron Cache** (future):
 - LRU cache storing hot neuron weight blocks in GPU memory
-- Block size: 64 neurons × intermediate_dim (e.g., 64×1024 = 65K values = 128KB f16)
-- Total cache size: 3-4GB (fits in 4GB GPU after overhead)
+- Block size: 64 neurons × intermediate_dim
 - Miss triggers async DMA from CPU RAM to GPU
 
-**Scheduler**:
+**Scheduler** (future):
 Before each FFN layer:
 1. Run predictor on current activations → hot block set
 2. Check GPU cache for each hot block
@@ -97,50 +96,15 @@ Before each FFN layer:
 6. Wait for GPU completion (or pipeline with next layer)
 7. Merge GPU hot outputs + CPU cold outputs
 
-### 5. GPU Kernels
+### 5. GPU Kernels (IN PROGRESS)
 
-Written in Rust using `rust-gpu` (compiled to PTX or SPIR-V).
+Currently using CUDA PTX inline strings with cust bindings. One kernel implemented:
+- **matvec_kernel**: matrix-vector multiply on GPU (sm_61 PTX)
 
-#### SparseMatMul
-```rust
-#[kernel]
-fn sparse_matmul_hot(
-    hot_indices: &[u32],        // Indices of active output neurons
-    weights: &[f16],            // Weight matrix [n_out, n_in] (full in RAM)
-    activations: &[f16],        // Input vector [n_in]
-    output: &mut [f16],         // Output vector [n_out], only hot written
-    n_out: usize,
-    n_in: usize,
-    n_hot: usize,
-) { /* ... */ }
-```
+Future kernels: sparse matmul, fused ops, MoE dispatch.
+Future kernels: sparse matmul, fused ops, MoE dispatch.
 
-Only computes rows corresponding to hot neuron indices. Cold rows skipped entirely.
-
-#### FusedOps
-Fuses multiple operations to reduce memory traffic:
-```
-input → RMSNorm → RoPE → SwiGLU → MatMul → output
-```
-All in one kernel, reading weights from neuron cache.
-
-#### MoERouter
-For MoE layers:
-- Compute token embeddings → expert affinities
-- Select top-8 experts (gating + shared)
-- Scatter token to expert buffers
-- Launch expert kernels (each expert is dense FFN)
-
-#### DeltaNet
-Gated DeltaNet recurrent attention for Qwen3.5:
-- Maintain state vector per sequence
-- Update: `state = A * state + B * input`
-- Output: `y = C * state + D * input`
-- Chunked parallelism over sequence dimension
-
-All kernels designed for **CUDA** (sm_61, sm_75, sm_87) and **Vulkan** (compute shader).
-
-### 6. Multi-GPU Coordination
+### 6. Multi-GPU Coordination (PLANNED)
 
 For 2×1050 Ti (4GB each):
 
@@ -313,16 +277,16 @@ The two techniques are multiplicative:
 ## Limitations & Future Work
 
 ### Current Limitations
-- **No pure Rust CUDA kernels yet**: rust-gpu is experimental; we'll initially use C++ kernels via llama.cpp as fallback
-- **Predictor training required per architecture**: Manual step for new model families
-- **DeltaNet chunking not fully optimized**: Autoregressive nature limits parallelism
-- **No flash attention**: KV cache still full size; could add sliding window
+- **One CUDA kernel**: MatVec PTX kernel exists but not yet tested on actual GPU hardware
+- **No MoE routing**: Needed for Qwen3.5-35B-A3B (planned, not implemented)
+- **No sparse GPU execution**: Core PowerInfer innovation not yet implemented
+- **CPU-only inference**: Forward pass works but too slow without GPU acceleration
 
 ### Future Directions
-- **Online predictor adaptation**: Fine-tune predictor during inference based on observed hotness
-- **Speculative decoding**: Use MTP-like module for 2× speed
-- **Kernel fusion in Rust**: Move all kernels to pure rust-gpu (long-term)
-- **Quantization-aware sparsity**: Different hot thresholds per quant level
+- **CUDA matvec on GPU**: Test PTX kernel on 1050 Ti, verify output matches CPU
+- **MoE routing**: Select active experts per token for sparse MoE execution
+- **Sparse GPU split**: Hot neurons on GPU, cold on CPU (core PowerInfer)
+- **TurboQuant KV cache**: Compressed cache in VRAM for longer context
 - **Continuous batching**: Multi-request scheduling to improve GPU utilization
 
 ## References
@@ -349,4 +313,5 @@ The two techniques are multiplicative:
 
 - **gguf-rs**: [crates.io/crates/gguf-rs](https://crates.io/crates/gguf-rs) — GGUF file format parser for Rust
 - **llama.cpp**: [github.com/ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) — Reference for GGUF format, quantization schemes, backend abstractions
-- **rust-gpu**: [github.com/rust-gpu/rust-gpu](https://github.com/rust-gpu/rust-gpu) — Compile Rust to GPU shaders (SPIR-V/NVVM)
+- **rust-gpu**: [github.com/rust-gpu/rust-gpu](https://github.com/rust-gpu/rust-gpu) — Compile Rust to GPU shaders (SPIR-V/NVVM). Not currently used — CUDA PTX inline strings used instead.
+- **cust**: [crates.io/crates/cust](https://crates.io/crates/cust) — Rust CUDA driver API bindings

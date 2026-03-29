@@ -47,7 +47,7 @@ fn smoke_ops_produce_finite_output() {
     let head_dim = 4;
     let mut q = [1.0, 2.0, 3.0, 4.0f32];
     let mut k = [5.0, 6.0, 7.0, 8.0f32];
-    ops::apply_rope(&mut q, &mut k, 0, head_dim, head_dim);
+    ops::apply_rope(&mut q, &mut k, 0, head_dim, head_dim, 10000.0);
     assert!((q[0] - 1.0).abs() < 1e-6);
     assert!(q.iter().all(|v| v.is_finite()));
     assert!(k.iter().all(|v| v.is_finite()));
@@ -115,7 +115,7 @@ fn smoke_activation_profiler_records() {
 }
 
 #[test]
-fn smoke_benchmark_math() {
+fn smoke_benchmark_creates() {
     use powerinfer::benchmark::QualityBenchmark;
     let bench = QualityBenchmark::new();
     let _ = bench;

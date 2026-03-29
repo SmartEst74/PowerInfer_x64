@@ -36,6 +36,8 @@ pub struct ModelConfig {
     pub feed_forward_length: usize,
     pub moe: Option<crate::gguf::MoeConfig>,
     pub quantization: QuantizationType,
+    pub rms_epsilon: f32,
+    pub rope_freq_base: f32,
 }
 
 /// KV cache for a single layer
@@ -148,7 +150,8 @@ impl InferenceContext {
         let n_ff = self.config.feed_forward_length;
         let vocab_size = self.tokenizer.vocab_size();
         let rope_dim = self.config.attention.rope_dim.unwrap_or(head_dim);
-        let rms_eps = 1e-6f32;
+        let rms_eps = self.config.rms_epsilon;
+        let rope_freq_base = self.config.rope_freq_base;
 
         // GGUF token_embd.weight: [n_embd, n_vocab] — each row is one embedding dim
         let embed_w = self.weights.get_data("token_embd.weight")?;
@@ -244,7 +247,14 @@ impl InferenceContext {
                     let mut k_head = vec![0.0f32; head_dim];
                     k_head.copy_from_slice(&k[kv_offset..kv_offset + head_dim]);
 
-                    ops::apply_rope(&mut q_head, &mut k_head, abs_pos, head_dim, rope_dim);
+                    ops::apply_rope(
+                        &mut q_head,
+                        &mut k_head,
+                        abs_pos,
+                        head_dim,
+                        rope_dim,
+                        rope_freq_base,
+                    );
 
                     q[h_offset..h_offset + head_dim].copy_from_slice(&q_head);
                     k[kv_offset..kv_offset + head_dim].copy_from_slice(&k_head);
@@ -405,6 +415,17 @@ fn sample_argmax(logits: &[f32]) -> u32 {
 mod tests {
     #[test]
     fn test_model_config_parsing() {
-        // Integration test with actual GGUF file
+        let path = "/home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP: model not found");
+            return;
+        }
+        let gguf = crate::gguf::GgufFile::open(path).expect("GGUF should load");
+        let config = gguf.model_config().expect("config should parse");
+        assert_eq!(config.arch, "qwen2");
+        assert_eq!(config.block_count, 36);
+        assert_eq!(config.embedding_length, 2048);
+        assert_eq!(config.attention.head_count, 16);
+        assert_eq!(config.attention.head_dim, 128);
     }
 }

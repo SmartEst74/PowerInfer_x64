@@ -111,29 +111,6 @@ unsafe fn elem_mul_sse(out: &mut [f32], a: &[f32], b: &[f32]) {
     }
 }
 
-/// SIMD scalar multiply and add: out = a * scalar + b (FMA-like without AVX)
-#[allow(dead_code)]
-#[inline]
-#[target_feature(enable = "sse4.1")]
-unsafe fn scale_add_sse(out: &mut [f32], a: &[f32], scalar: f32, b: &[f32]) {
-    let n = out.len();
-    let vs = _mm_set1_ps(scalar);
-    let mut i = 0;
-
-    while i + 4 <= n {
-        let va = _mm_loadu_ps(a.as_ptr().add(i));
-        let vb = _mm_loadu_ps(b.as_ptr().add(i));
-        let result = _mm_add_ps(_mm_mul_ps(va, vs), vb);
-        _mm_storeu_ps(out.as_mut_ptr().add(i), result);
-        i += 4;
-    }
-
-    while i < n {
-        out[i] = a[i] * scalar + b[i];
-        i += 1;
-    }
-}
-
 /// SIMD sum of squares: sum(a[i] * a[i])
 #[inline]
 #[target_feature(enable = "sse4.1")]
@@ -178,7 +155,23 @@ unsafe fn scale_sse(out: &mut [f32], a: &[f32], scalar: f32) {
     }
 }
 
-/// Safe wrapper for SIMD matvec (falls back to scalar if not x86_64)
+/// Safe wrapper for SIMD scale
+pub fn scale(out: &mut [f32], a: &[f32], scalar: f32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("sse4.1") {
+            unsafe {
+                scale_sse(out, a, scalar);
+            }
+            return;
+        }
+    }
+    for (o, &ai) in out.iter_mut().zip(a.iter()) {
+        *o = ai * scalar;
+    }
+}
+
+/// Safe wrapper for SIMD matvec
 pub fn matvec(y: &mut [f32], x: &[f32], w: &[f32], n_out: usize, n_in: usize) {
     #[cfg(target_arch = "x86_64")]
     {
@@ -189,7 +182,6 @@ pub fn matvec(y: &mut [f32], x: &[f32], w: &[f32], n_out: usize, n_in: usize) {
             return;
         }
     }
-    // Fallback to scalar
     crate::quant::matvec_f32(y, x, w, n_out, n_in);
 }
 
@@ -201,7 +193,6 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
             return unsafe { dot_product_sse(a, b) };
         }
     }
-    // Fallback
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
@@ -246,22 +237,6 @@ pub fn sum_squares(a: &[f32]) -> f32 {
         }
     }
     a.iter().map(|v| v * v).sum()
-}
-
-/// Safe wrapper for SIMD scale
-pub fn scale(out: &mut [f32], a: &[f32], scalar: f32) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("sse4.1") {
-            unsafe {
-                scale_sse(out, a, scalar);
-            }
-            return;
-        }
-    }
-    for (o, &ai) in out.iter_mut().zip(a.iter()) {
-        *o = ai * scalar;
-    }
 }
 
 #[cfg(test)]

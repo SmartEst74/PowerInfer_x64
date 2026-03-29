@@ -32,11 +32,18 @@ pub fn rms_norm(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
 /// For each pair (x[i], x[i+1]):
 ///   out[i]   = x[i] * cos - x[i+1] * sin
 ///   out[i+1] = x[i] * sin + x[i+1] * cos
-pub fn apply_rope(q: &mut [f32], k: &mut [f32], position: usize, head_dim: usize, rope_dim: usize) {
+pub fn apply_rope(
+    q: &mut [f32],
+    k: &mut [f32],
+    position: usize,
+    head_dim: usize,
+    rope_dim: usize,
+    base_freq: f32,
+) {
     let half = rope_dim / 2;
 
     for i in 0..half {
-        let freq = 1.0 / 10000.0f32.powf(2.0 * i as f32 / rope_dim as f32);
+        let freq = 1.0 / base_freq.powf(2.0 * i as f32 / rope_dim as f32);
         let theta = position as f32 * freq;
         let cos_theta = theta.cos();
         let sin_theta = theta.sin();
@@ -279,7 +286,7 @@ mod tests {
         let rope_dim = 4;
         let mut q = [1.0, 2.0, 3.0, 4.0f32];
         let mut k = [5.0, 6.0, 7.0, 8.0f32];
-        apply_rope(&mut q, &mut k, 0, head_dim, rope_dim);
+        apply_rope(&mut q, &mut k, 0, head_dim, rope_dim, 10000.0);
         // At position 0, RoPE should preserve values (cos(0)=1, sin(0)=0)
         assert!((q[0] - 1.0).abs() < 1e-6);
         assert!((q[1] - 2.0).abs() < 1e-6);

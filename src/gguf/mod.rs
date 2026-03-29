@@ -165,6 +165,14 @@ impl GgufFile {
             feed_forward_length: self.feed_forward_length()?,
             moe: self.moe_config(),
             quantization: self.quantization_type()?,
+            rms_epsilon: self
+                .get_config("attention.layer_norm_rms_epsilon")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1e-6) as f32,
+            rope_freq_base: self
+                .get_config("rope.freq_base")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(10000.0) as f32,
         })
     }
 
@@ -211,6 +219,15 @@ mod tests {
 
     #[test]
     fn test_load_gguf() {
-        // Integration test will load actual file
+        let path = "/home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP: model not found");
+            return;
+        }
+        let gguf = super::GgufFile::open(path).expect("GGUF should load");
+        let config = gguf.model_config().expect("config should parse");
+        assert_eq!(config.arch, "qwen2");
+        assert_eq!(config.block_count, 36);
+        assert_eq!(config.embedding_length, 2048);
     }
 }

@@ -195,8 +195,11 @@ impl Backend for CpuBackend {
     }
 
     fn memory_info(&self) -> Result<(usize, usize), BackendError> {
-        // Query system RAM - placeholder
-        Ok((16 * 1024 * 1024 * 1024, 32 * 1024 * 1024 * 1024)) // 16/32 GB
+        let resources = crate::sysinfo::SystemResources::scan();
+        Ok((
+            resources.available_ram as usize,
+            resources.total_ram as usize,
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {
