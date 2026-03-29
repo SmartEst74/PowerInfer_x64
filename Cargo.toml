@@ -26,7 +26,7 @@ thiserror = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 
 # HTTP server (optional)
-axum = { version = "0.7", optional = true }
+axum = { version = "0.8", optional = true }
 tower-http = { version = "0.5", features = ["cors"], optional = true }
 prometheus = { version = "0.13", optional = true }
 tracing = "0.1"
