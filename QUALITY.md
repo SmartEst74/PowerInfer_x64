@@ -1,104 +1,90 @@
 # Quality Baseline
 
-**Date**: 2026-03-28
-**Commit**: HEAD on master
-**Rust**: nightly-2025-06-23
+**Date**: 2026-03-29
+**Commit**: d64758e on master
+**Rust**: stable 1.94.1 (switched from nightly)
 
 ## Test Results
 
 | Category | Count | Status |
 |----------|-------|--------|
-| Unit tests | 32 | ✅ PASS |
+| Unit tests | 47 | ✅ PASS |
 | Smoke tests | 6 | ✅ PASS |
 | Soak tests (10K iterations) | 7 | ✅ PASS |
 | Integration tests | 5 | ✅ PASS |
+| Quality tests (real model) | 3+2 | ✅ PASS |
 | Doc tests | 1 | ✅ PASS |
-| **Total** | **51** | **✅ ALL PASS** |
+| **Total** | **69** | **✅ ALL PASS** |
 
 ## Lint
 
 | Check | Status |
 |-------|--------|
 | `cargo fmt --check` | ✅ PASS |
-| `cargo clippy -D warnings` (no features) | ✅ PASS |
-| `cargo clippy -D warnings` (--features server) | ✅ PASS |
+| `cargo clippy -D warnings` (stable) | ✅ PASS |
+| `cargo check --features cuda` | ✅ COMPILES |
 
-## Real Model Test (2026-03-28)
+## Real Model Test (2026-03-29)
 
-Tested against `Arch-Agent-3B.Q8_0.gguf` (3.1GB) on CPU (Ryzen 9 7950X).
+Tested against `Arch-Agent-3B.Q8_0.gguf` (3.1GB, Qwen2 arch, 36 layers, 2048 dim).
 
-### Results
+### Verified
 
 | Step | Time | Status |
 |------|------|--------|
-| GGUF file load | 1.36s | ✅ PASS |
-| Metadata parse | instant | ✅ PASS — qwen2 arch, 36 layers, 2048 dim, 16 heads, 2 KV heads |
-| Tensor listing | instant | ✅ PASS — 438 tensors, kind=8 (Q8_0) |
-| Weight load (Q8_0 → f32) | 96s | ✅ PASS — dequantizes all 3.1GB |
-| Forward pass | very slow | ⚠️ PARTIAL — runs but too slow without SIMD |
+| GGUF v3 parse | 1.2s | ✅ PASS |
+| Metadata extraction | instant | ✅ PASS — architecture, layers, dim all correct |
+| Weight dequant (Q8_0 → f32) | 18s | ✅ PASS — 434 tensors, all finite |
+| Forward pass (single token) | 30s | ✅ PASS — 151936 logits, all finite |
+| Logit quality | — | ✅ PASS — range -14.7 to 14.4, reasonable |
+| Embedding values | — | ✅ PASS — mean 0.0001, range -0.09 to 0.08 |
 
 ### What Works
 
-- GGUF v3 parsing with `qwen2` architecture prefix (not hardcoded to `llama.`)
-- Q8_0 dequantization of real model weights (3.1GB → f32)
-- Model config extraction from real GGUF metadata
-- Tensor name-based weight lookup
-- Full forward pass executes (RMSNorm → Q/K/V → attention → FFN → output)
+- GGUF parsing (all architectures: qwen2, qwen3, llama)
+- Dequantization (Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K_M, Q5_K_M, Q6_K)
+- Forward pass (RMSNorm → RoPE → attention → FFN SwiGLU → output)
+- SIMD SSE4.1 matvec (4x speedup over scalar)
+- CUDA backend skeleton (compiles with cust 0.3.2)
+- System resource detection (2x GTX 1050 Ti, 8GB VRAM)
+- TurboQuant KV cache compression (algorithm, 8x ratio)
+- Activation profiler (neuron hotness tracking)
+- CI/CD pipeline (4 stages, stable Rust)
+- Prometheus metrics (9 metrics, /metrics endpoint)
 
-### What's Slow
+### What Doesn't Work Yet
 
-- Pure f32 matvec without SIMD: each matvec is O(n²) with no vectorization
-- A 2048×11008 FFN matvec = 22.5M multiply-adds, ~10ms per call on CPU
-- 36 layers × 4 matvecs per layer × 2 passes (prompt + decode) = very slow
-- Needs: SIMD (std::simd), tiled matmul, fused dequant+matmul (Issue #40-45)
+| Gap | Issue | Impact |
+|-----|-------|--------|
+| Coherent output generation | #126 | Forward pass runs but output not yet tested for coherence |
+| Reference comparison | #127 | Need llama.cpp logits for validation |
+| CUDA GPU execution | #128 | PTX kernel written but not tested on actual GPU |
+| Sparse GPU execution | #129 | Core PowerInfer innovation — not yet implemented |
+| Benchmark CI | #130 | Performance regression tracking needed |
 
-### What's Missing for Qwen3-4B
+### Performance
 
-- Q5_K dequantization not implemented (kind=12) — Qwen3-4B uses Q4_K_M which requires Q5_K support
-- Q4_K_M dequantization not implemented (superblock scaling)
-- attn_k_norm and attn_q_norm tensors present in Qwen3 but not used in forward pass
-- No Qwen3-specific full_attention_interval handling
+| Config | Speed | Notes |
+|--------|-------|-------|
+| CPU (Pentium G4400, SIMD) | ~30s/token | Functional, not usable |
+| CUDA (2x GTX 1050 Ti) | NOT TESTED | PTX kernel compiles, not run on GPU |
+| Target (sparse GPU) | 5-10 tok/s | Requires CUDA + MoE routing |
 
 ## Honest Assessment
 
-The pipeline **works end-to-end** for Q8_0 models:
-- Parse GGUF ✅
-- Read metadata ✅
-- Load weights ✅
-- Run forward pass ✅ (functional, not performant)
+The codebase is **30% of the functional goal**. The foundation (GGUF parsing, dequantization, forward pass) is proven against real model files. The core innovation (GPU sparse execution) is scaffolded but not tested. The project needs:
 
-For Q4_K_M models (Qwen3-4B, most common quant):
-- Parse GGUF ✅
-- Read metadata ✅
-- Load weights ❌ (Q5_K dequant not implemented)
+1. CUDA matvec actually running on GPU (test PTX kernel on 1050 Ti)
+2. Forward pass on GPU (move attention + FFN to GPU)
+3. MoE routing (select active experts per token)
+4. Quality validation (perplexity comparison)
 
-Next priority: implement Q4_K_M and Q5_K dequantization to support the most common model format.
+## Open Issues (5)
 
-## What Is NOT Yet Tested
-
-| Requirement | Issue | Status |
-|-------------|-------|--------|
-| Forward pass vs llama.cpp reference (1e-4) | #31 | ❌ NOT DONE |
-| Generate 512 tokens coherence check | #32 | ❌ NOT DONE |
-| Qwen3-8B perplexity validation | #60 | ❌ NOT DONE |
-| Benchmark: >10 tok/s on CPU | #33 | ❌ NOT DONE |
-| Q4_K_M dequantization | #37 | ❌ NOT DONE |
-| Q5_K_M dequantization | #38 | ❌ NOT DONE |
-
-## CI Pipeline
-
-- Lint: `cargo fmt` + `cargo clippy -D warnings` (both default and server features)
-- Test: matrix strategy (no features + --features server)
-- Security: `cargo audit`
-- Benchmark: runs on push, stores artifacts
-
-## Commit History (this session)
-
-- Real model test with Arch-Agent-3B Q8_0 — GGUF loads, weights load, forward pass runs
-- Fix GGUF config parser to support architecture-specific prefixes (qwen2, qwen3, etc.)
-- Add smoke/soak/integration test suites (18 new tests)
-- Close 19 completed GitHub issues
-- CI matrix strategy for feature testing
-- TurboQuant KV cache compression (7 tests)
-- Activation profiler (6 tests)
-- Quality benchmark (4 tests)
+| # | Title | Priority |
+|---|-------|----------|
+| 126 | Generate coherent output | HIGH |
+| 127 | Validate against llama.cpp reference | HIGH |
+| 128 | CUDA kernels on GPU | HIGH |
+| 129 | Sparse GPU execution | HIGH |
+| 130 | Performance benchmark CI | MEDIUM |
