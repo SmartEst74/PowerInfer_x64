@@ -123,6 +123,18 @@ impl InferenceContext {
         Ok(output)
     }
 
+    /// Transposed matvec: y = W^T @ x
+    /// W is [n_rows, n_cols] row-major, x is [n_rows], y is [n_cols]
+    fn matvec_t(y: &mut [f32], x: &[f32], w: &[f32], n_rows: usize, n_cols: usize) {
+        for j in 0..n_cols {
+            let mut sum = 0.0f32;
+            for i in 0..n_rows {
+                sum += x[i] * w[i * n_cols + j];
+            }
+            y[j] = sum;
+        }
+    }
+
     /// Single forward pass through the model
     ///
     /// Returns logits over the vocabulary for the last position.
@@ -138,23 +150,38 @@ impl InferenceContext {
         let rope_dim = self.config.attention.rope_dim.unwrap_or(head_dim);
         let rms_eps = 1e-6f32;
 
-        // Get embedding weights
+        // GGUF token_embd.weight: [n_embd, n_vocab] — each row is one embedding dim
         let embed_w = self.weights.get_data("token_embd.weight")?;
 
-        // Process each input token
+        // Derive vocab_size from embedding weight if tokenizer metadata is missing
+        let tensor = self
+            .weights
+            .get("token_embd.weight")
+            .ok_or_else(|| anyhow::anyhow!("token_embd.weight not found"))?;
+        let actual_vocab = if tensor.shape.len() >= 2 {
+            tensor.shape[1]
+        } else {
+            vocab_size
+        };
+        let eff_vocab = if vocab_size <= 10 {
+            actual_vocab
+        } else {
+            vocab_size
+        };
         let n_tokens = tokens.len();
 
-        // Embedding lookup: x = embed_w[token_id * n_embd .. (token_id+1) * n_embd]
+        // Embedding lookup: embedding[i] = embed_w[i * eff_vocab + token_id]
         let mut x = vec![0.0f32; n_tokens * n_embd];
-        for (i, &token_id) in tokens.iter().enumerate() {
+        for (t, &token_id) in tokens.iter().enumerate() {
             let id = token_id as usize;
-            if id * n_embd + n_embd <= embed_w.len() {
-                let src = &embed_w[id * n_embd..(id + 1) * n_embd];
-                x[i * n_embd..(i + 1) * n_embd].copy_from_slice(src);
+            for i in 0..n_embd {
+                let idx = i * eff_vocab + id;
+                if idx < embed_w.len() {
+                    x[t * n_embd + i] = embed_w[idx];
+                }
             }
         }
 
-        // Transformer layers
         for layer_idx in 0..n_layers {
             let prefix = format!("blk.{layer_idx}");
 
@@ -320,13 +347,14 @@ impl InferenceContext {
         );
 
         // Output projection (LM head)
+        // Weight is [n_embd, n_vocab] — use transposed matvec
         let output_w = self
             .weights
             .get_data("output.weight")
             .or_else(|_| self.weights.get_data("token_embd.weight"))?;
 
-        let mut logits = vec![0.0f32; vocab_size];
-        ops::matvec(&mut logits, &final_x, output_w, vocab_size, n_embd);
+        let mut logits = vec![0.0f32; eff_vocab];
+        Self::matvec_t(&mut logits, &final_x, output_w, n_embd, eff_vocab);
 
         Ok(logits)
     }
@@ -344,6 +372,11 @@ impl InferenceContext {
     /// Get tokenizer reference
     pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
+    }
+
+    /// Get weights reference
+    pub fn weights(&self) -> &Weights {
+        &self.weights
     }
 
     /// Reset KV caches

@@ -149,25 +149,40 @@ pub fn attention_head(
     }
 }
 
+/// Transposed matvec: y = W^T @ x
+/// W is [n_rows, n_cols] row-major, x is [n_rows], y is [n_cols]
+pub fn matvec_t(y: &mut [f32], x: &[f32], w: &[f32], n_rows: usize, n_cols: usize) {
+    for j in 0..n_cols {
+        let mut sum = 0.0f32;
+        for i in 0..n_rows {
+            sum += x[i] * w[i * n_cols + j];
+        }
+        y[j] = sum;
+    }
+}
+
 /// Feed-forward network with SwiGLU (Llama/Qwen style)
 ///
-/// ffn(x) = (SiLU(x @ gate) * (x @ up)) @ down
+/// Weight layout (GGUF): gate_w and up_w are [hidden_dim, intermediate_dim],
+/// down_w is [intermediate_dim, hidden_dim].
+///
+/// ffn(x) = (SiLU(gate_w @ x) * (up_w @ x)) @ down_w
 pub fn ffn_swiglu(
     out: &mut [f32], // [hidden_dim]
     x: &[f32],       // [hidden_dim]
-    gate_w: &[f32],  // [intermediate * hidden_dim]
-    up_w: &[f32],    // [intermediate * hidden_dim]
-    down_w: &[f32],  // [hidden_dim * intermediate]
+    gate_w: &[f32],  // [hidden_dim, intermediate_dim] in GGUF
+    up_w: &[f32],    // [hidden_dim, intermediate_dim] in GGUF
+    down_w: &[f32],  // [intermediate_dim, hidden_dim] in GGUF
     hidden_dim: usize,
     intermediate_dim: usize,
 ) {
     let mut gate = vec![0.0f32; intermediate_dim];
     let mut up = vec![0.0f32; intermediate_dim];
 
-    // gate = x @ gate_w
-    matvec(&mut gate, x, gate_w, intermediate_dim, hidden_dim);
-    // up = x @ up_w
-    matvec(&mut up, x, up_w, intermediate_dim, hidden_dim);
+    // gate = gate_w @ x (W is [hidden, inter], need transposed matvec)
+    matvec_t(&mut gate, x, gate_w, hidden_dim, intermediate_dim);
+    // up = up_w @ x
+    matvec_t(&mut up, x, up_w, hidden_dim, intermediate_dim);
 
     // gate = SiLU(gate)
     silu(&mut gate);
@@ -180,7 +195,7 @@ pub fn ffn_swiglu(
         .collect::<Vec<_>>();
     gate.copy_from_slice(&result);
 
-    // out = gate @ down_w
+    // out = gate @ down_w (W is [inter, hidden], normal matvec)
     matvec(out, &gate, down_w, hidden_dim, intermediate_dim);
 }
 
