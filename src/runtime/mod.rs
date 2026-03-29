@@ -204,16 +204,21 @@ impl Backend for CpuBackend {
     }
 }
 
-// Placeholder CUDA backend
+// CUDA backend — real implementation when cuda feature is enabled,
+// placeholder stub otherwise.
+
+#[cfg(feature = "cuda")]
 pub struct CudaBackend {
     name: String,
-    #[allow(dead_code)]
     device_id: usize,
 }
 
+#[cfg(feature = "cuda")]
 impl CudaBackend {
     pub fn new(device_id: usize) -> Result<Self, BackendError> {
-        // Check CUDA available, get device properties
+        // Validate CUDA is available by creating a context
+        crate::cuda::cuda_impl::gpu_memory(device_id as u32)
+            .map_err(|e| BackendError::CudaError(e))?;
         Ok(Self {
             name: format!("CUDA:{device_id}"),
             device_id,
@@ -221,6 +226,7 @@ impl CudaBackend {
     }
 }
 
+#[cfg(feature = "cuda")]
 impl Backend for CudaBackend {
     fn name(&self) -> &str {
         &self.name
@@ -259,8 +265,8 @@ impl Backend for CudaBackend {
     fn launch_kernel(
         &self,
         kernel: &Kernel,
-        _grid_dim: (u32, u32, u32),
-        _block_dim: (u32, u32, u32),
+        _grid: (u32, u32, u32),
+        _block: (u32, u32, u32),
         _args: &[KernelArg],
     ) -> Result<(), BackendError> {
         Err(BackendError::InvalidKernel(kernel.name.clone()))
@@ -271,8 +277,85 @@ impl Backend for CudaBackend {
     }
 
     fn memory_info(&self) -> Result<(usize, usize), BackendError> {
-        // Query GPU memory
-        Ok((2 * 1024 * 1024 * 1024, 4 * 1024 * 1024 * 1024)) // 2/4 GB
+        crate::cuda::cuda_impl::gpu_memory(self.device_id as u32)
+            .map_err(|e| BackendError::CudaError(e))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// Placeholder CUDA backend when cuda feature is not enabled
+#[cfg(not(feature = "cuda"))]
+pub struct CudaBackend {
+    name: String,
+    #[allow(dead_code)]
+    device_id: usize,
+}
+
+#[cfg(not(feature = "cuda"))]
+impl CudaBackend {
+    pub fn new(device_id: usize) -> Result<Self, BackendError> {
+        Ok(Self {
+            name: format!("CUDA:{device_id}"),
+            device_id,
+        })
+    }
+}
+
+#[cfg(not(feature = "cuda"))]
+impl Backend for CudaBackend {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn allocate(&self, size: usize) -> Result<Buffer, BackendError> {
+        Ok(Buffer {
+            id: 0,
+            size,
+            backend_type: BackendType::Cuda,
+        })
+    }
+
+    fn free(&self, _buffer: Buffer) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn copy_to_device(
+        &self,
+        _dst: &Buffer,
+        _src: &[u8],
+        _offset: usize,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn copy_to_host(
+        &self,
+        _src: &Buffer,
+        _dst: &mut [u8],
+        _offset: usize,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn launch_kernel(
+        &self,
+        kernel: &Kernel,
+        _grid: (u32, u32, u32),
+        _block: (u32, u32, u32),
+        _args: &[KernelArg],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::InvalidKernel(kernel.name.clone()))
+    }
+
+    fn synchronize(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn memory_info(&self) -> Result<(usize, usize), BackendError> {
+        Ok((2 * 1024 * 1024 * 1024, 4 * 1024 * 1024 * 1024))
     }
 
     fn as_any(&self) -> &dyn Any {

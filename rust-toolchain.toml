@@ -1,4 +1,8 @@
 [toolchain]
-channel = "nightly-2025-06-23"
-components = ["rust-src", "rustc-dev", "llvm-tools-preview"]
-targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-gnu"]
+
+# For rust-gpu kernel compilation (when implemented), use:
+#   rustup run nightly-2025-06-23 cargo build --features cuda
+# Or set RUSTUP_TOOLCHAIN=nightly-2025-06-23

@@ -24,6 +24,8 @@
 
 pub mod activation;
 pub mod benchmark;
+#[cfg(feature = "cuda")]
+pub mod cuda;
 pub mod gguf;
 pub mod model;
 pub mod ops;
