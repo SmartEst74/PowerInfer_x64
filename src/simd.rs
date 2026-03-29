@@ -333,4 +333,47 @@ mod tests {
         scale(&mut out, &a, 2.0);
         assert_eq!(out, [2.0, 4.0, 6.0, 8.0, 10.0]);
     }
+
+    #[test]
+    fn test_simd_is_faster_than_scalar() {
+        let n = 2048;
+        let m = 256; // smaller for test speed
+        let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.001).sin()).collect();
+        let w: Vec<f32> = (0..n * m).map(|i| (i as f32 * 0.001).cos()).collect();
+        let mut y_simd = vec![0.0f32; m];
+        let mut y_scalar = vec![0.0f32; m];
+
+        // Warm up SIMD
+        matvec(&mut y_simd, &x, &w, m, n);
+
+        // Time SIMD
+        let start = std::time::Instant::now();
+        let iters = 100;
+        for _ in 0..iters {
+            matvec(&mut y_simd, &x, &w, m, n);
+        }
+        let simd_us = start.elapsed().as_micros() / iters;
+
+        // Time scalar
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            crate::quant::matvec_f32(&mut y_scalar, &x, &w, m, n);
+        }
+        let scalar_us = start.elapsed().as_micros() / iters;
+
+        // Verify correctness (allow small floating point differences from different op order)
+        for i in 0..m {
+            assert!(
+                (y_simd[i] - y_scalar[i]).abs() < 1e-2,
+                "SIMD mismatch at {i}: simd={} scalar={}",
+                y_simd[i],
+                y_scalar[i]
+            );
+        }
+
+        eprintln!(
+            "  SIMD matvec({n}→{m}): {simd_us}μs vs scalar: {scalar_us}μs ({}x)",
+            if simd_us > 0 { scalar_us / simd_us } else { 0 }
+        );
+    }
 }

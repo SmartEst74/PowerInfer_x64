@@ -96,6 +96,10 @@ path = "src/bin/real_test.rs"
 name = "gguf_dump"
 path = "src/bin/gguf_dump.rs"
 
+[[bin]]
+name = "timing_test"
+path = "src/bin/timing_test.rs"
+
 [[bench]]
 name = "benchmark"
 harness = false
