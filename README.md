@@ -17,9 +17,10 @@ As of 2026-04-02, this repository is a working prototype with verified CPU infer
 - `cargo run --release --bin real_test -- /path/to/model.gguf` works and produces a correct first token on the flagship validation model, Qwen3.5-35B-A3B Q8_0.
 - The latest verified release-mode decode result on the development box is `1.44-1.46 tok/s` average on the CPU backend.
 - CUDA and Vulkan compilation, hardware detection, and execution planning exist, but the planned GPU split is not yet dispatched end to end.
-- The HTTP server and profiler are both partial:
-  - the server loads a model and exposes `/health`, `/metrics`, `/v1/completions`, `/v1/chat/completions`, and `/v1/models`, but the completion handlers still return dummy payloads;
-  - the profiler CLI parses and reports model structure, but hot-neuron index generation is not implemented yet.
+- The HTTP server now generates real model-backed completions, but it is still partial overall:
+  - `/v1/completions`, `/v1/chat/completions`, `/v1/models`, `/health`, and `/metrics` are live against the loaded model;
+  - generation is currently greedy-only, non-streaming, and serialized behind a single model lock;
+  - the profiler CLI still parses and reports model structure, but hot-neuron index generation is not implemented yet.
 
 ## Performance Target
 
@@ -73,7 +74,7 @@ All speed claims in this repository should be read as `--release` numbers. The s
 
 - GPU execution is planned but not yet wired through the runtime for end-to-end token generation.
 - The core PowerInfer goal, sparse hot-neuron GPU execution with cold-neuron CPU fallback, is not implemented yet.
-- The server does not yet use real inference results for `/v1/completions` or `/v1/chat/completions`.
+- The server does not yet support streaming or sampling controls; the validated path is greedy generation only.
 - The predictor and profiler paths are scaffolding, not a finished hot-index pipeline.
 - Sampling is still limited; greedy decoding is the current tested path.
 - Qwen3.5 chat templating and reference comparison against llama.cpp are still open tasks.
@@ -114,7 +115,7 @@ The current Qwen3.5 result only became credible after a set of architecture-spec
 | End-to-end GPU token generation | Partial |
 | Sparse hot-neuron execution | Not done |
 | Profiler to hot-index pipeline | Partial |
-| OpenAI-compatible inference server | Partial |
+| OpenAI-compatible inference server | Partial, model-backed |
 | Benchmark regression tracking in CI | Open issue |
 
 ## Journey So Far
@@ -168,7 +169,7 @@ cargo run --release --bin powerinfer-cli -- generate \
 cargo run --release --features server --bin powerinfer-serve -- /path/to/model.gguf
 ```
 
-Current limitation: the server loads a model, exposes metrics, and provides OpenAI-style routes, but the completion routes still return dummy text rather than model output.
+Current limitation: the server now returns real model output, but only for non-streaming greedy generation. Sampling controls and fuller protocol compatibility are still incomplete.
 
 ### Run The Profiler Scaffold
 
@@ -182,7 +183,7 @@ Current limitation: this path currently performs model analysis only. It does no
 
 ## Infrastructure Notes
 
-The repository includes substantial deployment and observability scaffolding under `deployments/` and `infrastructure/`, including Docker Compose, Prometheus, Grafana, Alertmanager, Terraform, and runbooks. Those assets are useful for the future serving target, but they should be read as infrastructure scaffolding until the server path is wired to real inference.
+The repository includes substantial deployment and observability scaffolding under `deployments/` and `infrastructure/`, including Docker Compose, Prometheus, Grafana, Alertmanager, Terraform, and runbooks. Those assets are now aligned with a real-inference server path, but they should still be read as pre-production scaffolding rather than proof of a hardened deployment.
 
 ## Documentation Map
 

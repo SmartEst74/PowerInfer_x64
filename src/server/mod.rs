@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 use tower_http::cors::{CorsLayer, Any};
 use tracing::info;
 
@@ -20,7 +20,7 @@ use crate::metrics::{Metrics, SharedMetrics};
 /// Application state shared across requests
 #[derive(Clone)]
 pub struct AppState {
-    pub model: Arc<RwLock<Arc<InferenceContext>>>,
+    pub model: Arc<Mutex<InferenceContext>>,
     pub max_concurrent: usize,
     pub semaphore: Arc<Semaphore>,
     pub metrics: SharedMetrics,
@@ -66,6 +66,29 @@ pub struct CompletionChoice {
     pub finish_reason: String,
 }
 
+/// OpenAI-style response: Chat completions
+#[derive(Debug, Serialize)]
+pub struct ChatCompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatCompletionChoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatCompletionChoice {
+    pub index: usize,
+    pub message: ChatCompletionMessage,
+    pub finish_reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatCompletionMessage {
+    pub role: String,
+    pub content: String,
+}
+
 /// OpenAI-style request: Chat completions
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -82,17 +105,103 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+fn request_token_budget(max_tokens: Option<usize>) -> usize {
+    max_tokens.unwrap_or(64).clamp(1, 512)
+}
+
+fn build_chat_prompt(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .map(|message| format!("{}: {}", message.role, message.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn validate_generation_options(
+    stream: Option<bool>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+) -> Result<(), ApiError> {
+    if stream.unwrap_or(false) {
+        return Err(ApiError::bad_request("streaming responses are not implemented"));
+    }
+
+    if temperature.unwrap_or(0.0) != 0.0 {
+        return Err(ApiError::bad_request(
+            "sampling is not implemented; use temperature 0.0",
+        ));
+    }
+
+    if let Some(top_p) = top_p {
+        if (top_p - 1.0).abs() > f32::EPSILON {
+            return Err(ApiError::bad_request(
+                "top_p sampling is not implemented; omit top_p or use 1.0",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn make_completion_response(model: String, text: String) -> CompletionResponse {
+    CompletionResponse {
+        id: format!("cmpl-{}", chrono::Utc::now().timestamp_millis()),
+        object: "text_completion".to_string(),
+        created: chrono::Utc::now().timestamp() as u64,
+        model,
+        choices: vec![CompletionChoice {
+            text,
+            index: 0,
+            logprobs: None,
+            finish_reason: "stop".to_string(),
+        }],
+    }
+}
+
+fn make_chat_response(model: String, text: String) -> ChatCompletionResponse {
+    ChatCompletionResponse {
+        id: format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis()),
+        object: "chat.completion".to_string(),
+        created: chrono::Utc::now().timestamp() as u64,
+        model,
+        choices: vec![ChatCompletionChoice {
+            index: 0,
+            message: ChatCompletionMessage {
+                role: "assistant".to_string(),
+                content: text,
+            },
+            finish_reason: "stop".to_string(),
+        }],
+    }
+}
+
 /// API error type for axum handlers
-pub struct ApiError(anyhow::Error);
+pub struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            self.status,
             Json(serde_json::json!({
                 "error": {
-                    "message": self.0.to_string(),
-                    "type": "server_error"
+                    "message": self.message,
+                    "type": if self.status == StatusCode::BAD_REQUEST {
+                        "invalid_request_error"
+                    } else {
+                        "server_error"
+                    }
                 }
             })),
         )
@@ -100,9 +209,21 @@ impl IntoResponse for ApiError {
     }
 }
 
-impl<E: Into<anyhow::Error>> From<E> for ApiError {
-    fn from(err: E) -> Self {
-        Self(err.into())
+impl From<anyhow::Error> for ApiError {
+    fn from(err: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<tokio::sync::AcquireError> for ApiError {
+    fn from(err: tokio::sync::AcquireError) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: err.to_string(),
+        }
     }
 }
 
@@ -139,7 +260,7 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
         &format!("{:?}", ctx.config().quantization),
     ]).set(1);
 
-    let ctx = Arc::new(RwLock::new(Arc::new(ctx)));
+    let ctx = Arc::new(Mutex::new(ctx));
     let max_concurrent = if config.max_concurrent == 0 {
         1
     } else {
@@ -170,32 +291,26 @@ async fn handle_completions(
     State(state): State<AppState>,
     Json(req): Json<CompletionRequest>,
 ) -> Result<Json<CompletionResponse>, ApiError> {
+    validate_generation_options(req.stream, req.temperature, req.top_p)?;
+
     let timer = state.metrics.inference_duration_seconds
         .with_label_values(&["completions"])
         .start_timer();
 
+    state.metrics.queue_depth.inc();
     let _permit = state.semaphore.clone().acquire_owned().await?;
     state.metrics.queue_depth.dec();
 
-    let _model = state.model.read().await;
-    let text = format!("[DUMMY] Response to: {}", req.prompt);
-
-    let resp = CompletionResponse {
-        id: "cmpl-123".to_string(),
-        object: "text_completion".to_string(),
-        created: chrono::Utc::now().timestamp() as u64,
-        model: req.model,
-        choices: vec![CompletionChoice {
-            text,
-            index: 0,
-            logprobs: None,
-            finish_reason: "stop".to_string(),
-        }],
+    let text = {
+        let mut model = state.model.lock().await;
+        model.generate(&req.prompt, request_token_budget(req.max_tokens))?
     };
+
+    let resp = make_completion_response(req.model, text);
 
     let tokens = resp.choices.first().map_or(0, |c| c.text.split_whitespace().count());
     state.metrics.tokens_generated_total
-        .with_label_values(&["unknown"])
+        .with_label_values(&[&resp.model])
         .inc_by(tokens as u64);
 
     timer.observe_duration();
@@ -210,39 +325,31 @@ async fn handle_completions(
 async fn handle_chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Result<Json<CompletionResponse>, ApiError> {
+) -> Result<Json<ChatCompletionResponse>, ApiError> {
+    validate_generation_options(req.stream, req.temperature, None)?;
+
     let timer = state.metrics.inference_duration_seconds
         .with_label_values(&["chat"])
         .start_timer();
 
+    state.metrics.queue_depth.inc();
     let _permit = state.semaphore.clone().acquire_owned().await?;
     state.metrics.queue_depth.dec();
 
-    let prompt = req
-        .messages
-        .iter()
-        .map(|m| format!("{}: {}\n", m.role, m.content))
-        .collect::<String>();
-
-    let _model = state.model.read().await;
-    let text = format!("[DUMMY CHAT] Reply to: {prompt}");
-
-    let resp = CompletionResponse {
-        id: "chatcmpl-123".to_string(),
-        object: "chat.completion".to_string(),
-        created: chrono::Utc::now().timestamp() as u64,
-        model: req.model,
-        choices: vec![CompletionChoice {
-            text,
-            index: 0,
-            logprobs: None,
-            finish_reason: "stop".to_string(),
-        }],
+    let prompt = build_chat_prompt(&req.messages);
+    let text = {
+        let mut model = state.model.lock().await;
+        model.generate(&prompt, request_token_budget(req.max_tokens))?
     };
 
-    let tokens = resp.choices.first().map_or(0, |c| c.text.split_whitespace().count());
+    let resp = make_chat_response(req.model, text);
+
+    let tokens = resp
+        .choices
+        .first()
+        .map_or(0, |c| c.message.content.split_whitespace().count());
     state.metrics.tokens_generated_total
-        .with_label_values(&["unknown"])
+        .with_label_values(&[&resp.model])
         .inc_by(tokens as u64);
 
     timer.observe_duration();
@@ -255,13 +362,19 @@ async fn handle_chat_completions(
 
 /// Handle /v1/models
 async fn handle_list_models(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Json<serde_json::Value> {
+    let model = state.model.try_lock();
+    let model_id = model
+        .ok()
+        .and_then(|ctx| ctx.config().name.clone())
+        .unwrap_or_else(|| "powerinfer-model".to_string());
+
     Json(serde_json::json!({
         "object": "list",
         "data": [
             {
-                "id": "powerinfer-model",
+                "id": model_id,
                 "object": "model",
                 "owned_by": "powerinfer",
                 "permission": []
@@ -290,6 +403,49 @@ async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_request_token_budget_bounds() {
+        assert_eq!(request_token_budget(None), 64);
+        assert_eq!(request_token_budget(Some(0)), 1);
+        assert_eq!(request_token_budget(Some(8)), 8);
+        assert_eq!(request_token_budget(Some(600)), 512);
+    }
+
+    #[test]
+    fn test_build_chat_prompt() {
+        let prompt = build_chat_prompt(&[
+            ChatMessage {
+                role: "system".to_string(),
+                content: "Be concise".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            },
+        ]);
+
+        assert_eq!(prompt, "system: Be concise\nuser: Hello");
+    }
+
+    #[test]
+    fn test_validate_generation_options() {
+        assert!(validate_generation_options(None, None, None).is_ok());
+        assert!(validate_generation_options(Some(false), Some(0.0), Some(1.0)).is_ok());
+        assert!(validate_generation_options(Some(true), None, None).is_err());
+        assert!(validate_generation_options(None, Some(0.7), None).is_err());
+        assert!(validate_generation_options(None, None, Some(0.9)).is_err());
+    }
+
+    #[test]
+    fn test_make_chat_response_shape() {
+        let resp = make_chat_response("demo".to_string(), "Paris".to_string());
+
+        assert_eq!(resp.object, "chat.completion");
+        assert_eq!(resp.choices.len(), 1);
+        assert_eq!(resp.choices[0].message.role, "assistant");
+        assert_eq!(resp.choices[0].message.content, "Paris");
+    }
 
     #[tokio::test]
     async fn test_server_types() {

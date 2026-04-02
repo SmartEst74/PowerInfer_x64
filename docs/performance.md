@@ -45,7 +45,7 @@ Hardware used for this baseline:
 - Use `--release` for any throughput or latency claim.
 - Always report the exact model file, hardware, and backend used.
 - Distinguish between planned GPU placement and actual runtime dispatch.
-- Do not present server request throughput as inference throughput yet; the server still returns dummy completions.
+- Do not present server request throughput as inference throughput by default; use explicit end-to-end server measurements and note that the current server path is greedy-only.
 - Do not claim GPU speedup until issues #128 and #129 are resolved and measured on real hardware.
 
 ## Why The Repo Is Not At Target Yet

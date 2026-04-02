@@ -48,7 +48,7 @@ Important note: performance claims in this repo should be based on release build
 | Sparse hot-neuron execution | Not done | Main PowerInfer goal remains open |
 | Predictor | Partial | Placeholder weights and scaffolding exist |
 | Profiler | Partial | Binary inspects model structure; hot-index generation is not implemented |
-| HTTP server | Partial | Routes and metrics exist; completion handlers return dummy text |
+| HTTP server | Partial | Routes and metrics work; completions are model-backed, but sampling/streaming and fuller compatibility are still incomplete |
 | Benchmark CI | Open | Tracked by issue #130 |
 
 ## Optimizations In Tree
@@ -89,7 +89,7 @@ Important note: performance claims in this repo should be based on release build
 
 1. Wire actual CUDA execution into the runtime instead of stopping at execution planning.
 2. Compare logits and token sequences against llama.cpp for the validated Qwen3.5 path.
-3. Replace dummy server completions with model-backed responses.
+3. Harden the server path with streaming, sampling, and compatibility work now that model-backed responses are live.
 4. Finish the profiler-to-hot-index pipeline so sparse execution work has real activation data.
 
 ## Local Validation Facts

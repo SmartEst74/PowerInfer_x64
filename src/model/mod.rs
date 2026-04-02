@@ -222,6 +222,8 @@ impl InferenceContext {
     /// Generate text and return per-token timing (seconds per token).
     /// First entry is prefill time, remaining are decode times.
     pub fn generate_timed(&mut self, prompt: &str, max_tokens: usize) -> Result<(String, Vec<f64>)> {
+        self.reset();
+
         let input_ids = self.tokenizer.encode(prompt);
 
         if input_ids.is_empty() {

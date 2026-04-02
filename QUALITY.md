@@ -12,6 +12,8 @@ cargo clippy --all-targets -- -D warnings
 cargo run --release --bin gguf_dump -- /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf
 cargo run --release --bin real_test -- /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf
 cargo run --release --bin powerinfer-cli -- generate --model /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf --prompt "The capital of France is" -n 1
+cargo test --features server
+cargo clippy --all-targets --features server -- -D warnings
 ```
 
 ## Code Health
@@ -20,6 +22,8 @@ cargo run --release --bin powerinfer-cli -- generate --model /home/jon/models/ll
 |-------|--------|
 | `cargo test` | 81 passed, 2 ignored, 0 failed |
 | `cargo clippy --all-targets -- -D warnings` | PASS |
+| `cargo test --features server` | PASS |
+| `cargo clippy --all-targets --features server -- -D warnings` | PASS |
 | Ignored tests | 2 path-dependent quality checks for alternate local GGUFs |
 
 ## Current Real-Model Benchmark
@@ -94,6 +98,7 @@ Quality interpretation:
 - Hardware profile and execution-plan reporting for the dual-1050-Ti development machine.
 - Quantization and dequantization unit coverage for Q4_0, Q8_0, Q4_1, Q4_K, Q5_K, Q6_K, F16, and F32 paths.
 - TurboQuant KV path wiring in the current forward implementation.
+- HTTP server routes that return real model-backed completions and chat completions in release mode.
 
 ## Known Gaps
 
@@ -103,9 +108,35 @@ Quality interpretation:
 | End-to-end CUDA token generation | Not wired |
 | Sparse hot-neuron GPU execution | Not implemented |
 | Reference comparison against llama.cpp | Open |
-| Server-backed real completions | Not implemented |
+| Server-backed real completions | Verified, basic |
 | Profiler hot-index generation | Not implemented |
 | Benchmark regression CI | Open |
+
+## Server Validation
+
+Validated release server command:
+
+```bash
+cargo run --release --features server --bin powerinfer-serve -- /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf
+```
+
+Validated local HTTP checks:
+
+```bash
+curl -s http://127.0.0.1:8080/v1/models
+curl -s http://127.0.0.1:8080/v1/completions \
+	-H 'Content-Type: application/json' \
+	-d '{"model":"Qwen3.5-35B-A3B","prompt":"The capital of France is","max_tokens":8,"temperature":0.0}'
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+	-H 'Content-Type: application/json' \
+	-d '{"model":"Qwen3.5-35B-A3B","messages":[{"role":"user","content":"Reply with one word: France capital?"}],"max_tokens":4,"temperature":0.0}'
+```
+
+Observed behavior:
+- `/v1/models` reports `Qwen3.5-35B-A3B`.
+- `/v1/completions` returned model-generated text from the loaded GGUF rather than a dummy payload.
+- `/v1/chat/completions` returned a real chat-completion payload rather than a dummy response.
+- The server is still greedy-only and rejects unsupported streaming/sampling options instead of pretending to implement them.
 
 ## Open Issues
 

@@ -81,13 +81,13 @@ cargo run --release --bin powerinfer-cli -- generate \
     -n 1
 ```
 
-### Start the HTTP server scaffold
+### Start the HTTP server
 
 ```bash
 cargo run --release --features server --bin powerinfer-serve -- /path/to/model.gguf
 ```
 
-Current limitation: the server loads a model, exposes routes and metrics, but completion handlers still return dummy text.
+Current limitation: the server returns real model output for basic requests, but it is still greedy-only and does not implement streaming.
 
 ### Run the profiler scaffold
 
