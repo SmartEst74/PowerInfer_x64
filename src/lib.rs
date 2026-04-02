@@ -14,7 +14,7 @@
 //! use powerinfer::runtime::BackendFactory;
 //!
 //! # fn main() -> anyhow::Result<()> {
-//! let mut ctx = InferenceContext::from_gguf("models/Qwen3-8B-Q4_K_M.gguf", BackendFactory::cpu())?;
+//! let mut ctx = InferenceContext::from_gguf("/path/to/model.gguf", BackendFactory::cpu())?;
 //!
 //! let output = ctx.generate("Hello, world!", 100)?;
 //! println!("{}", output);

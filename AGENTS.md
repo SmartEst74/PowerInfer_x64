@@ -19,7 +19,7 @@ gh issue list --state open
 git log --oneline -10
 
 # 5. Check if real models load
-cargo run --bin gguf_dump -- /home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf
+cargo run --release --bin gguf_dump -- /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf
 ```
 
 These commands tell you: what works, what's broken, what's planned, and what was just done. Do not proceed with work until you understand the output of all five.
@@ -44,15 +44,15 @@ cargo clippy --all-targets --features server -- -D warnings
 cargo fmt --all --check
 
 # Test against real model
-cargo run --bin real_test -- /home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf
+cargo run --release --bin real_test -- /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf
 
 # Dump GGUF metadata
-cargo run --bin gguf_dump -- /path/to/model.gguf
+cargo run --release --bin gguf_dump -- /path/to/model.gguf
 ```
 
 ## Tech Stack
 
-- Rust nightly-2025-06-23 (for rust-gpu)
+- Rust stable by default; `nightly-2025-06-23` only for future rust-gpu experiments
 - `gguf-rs` 0.1.7 (GGUF parsing)
 - `half` 2.4 (f16 support)
 - `anyhow` 1.0 (error handling)
@@ -99,7 +99,7 @@ cargo run --bin gguf_dump -- /path/to/model.gguf
 - Run `cargo test` before committing
 - Update `QUALITY.md` with results after real model tests
 - Cite sources for external references (arXiv papers, GitHub repos)
-- Test against `/home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf` for real model validation
+- Test against `/home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf` for real model validation
 
 ### Ask First Before
 
@@ -127,11 +127,7 @@ cargo run --bin gguf_dump -- /path/to/model.gguf
 
 ```
 /home/jon/models/llama-cache/
-  Arch-Agent-3B.Q8_0.gguf              3.1GB  Q8_0   Qwen2 arch ✅ WORKS
-  Qwen3-4B-Instruct-2507-Q4_K_M.gguf  2.4GB  Q4_K_M Qwen3 arch ❌ NEEDS Q5_K
-  gemma-3-4b-it-Q4_K_M.gguf           2.4GB  Q4_K_M Gemma arch ❌ NEEDS Q4_K_M
-  BitAgent-Bounty-8B.Q4_K_M.gguf      4.6GB  Q4_K_M ❌ NEEDS Q4_K_M
-  Salesforce.Llama-xLAM-2-8b-fc-r.Q4_K_M.gguf 4.6GB Q4_K_M ❌ NEEDS Q4_K_M
+  Qwen3.5-35B-A3B-Q8_0.gguf           34.4GB Q8_0   qwen35moe arch ✅ CURRENT VALIDATION MODEL
 ```
 
 ## Verified References
@@ -153,7 +149,7 @@ cargo run --bin gguf_dump -- /path/to/model.gguf
   mv /home/jon/Cargo.toml.bak /home/jon/Cargo.toml
   mv /home/jon/src.bak /home/jon/src
   ```
-- The project uses `nightly-2025-06-23` toolchain (for rust-gpu)
+- The project uses the stable toolchain by default; `nightly-2025-06-23` is only needed for rust-gpu experiments
 
 ## Quality Gates (L5 Architect + Uncle Bob Standards)
 

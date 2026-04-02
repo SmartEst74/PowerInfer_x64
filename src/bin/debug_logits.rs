@@ -1,17 +1,22 @@
 //! Debug test: inspect the actual logits from a forward pass.
-//! Usage: cargo run --release --bin debug_logits
+//! Usage: cargo run --release --bin debug_logits -- <path_to.gguf>
 
 use powerinfer::model::InferenceContext;
 use powerinfer::runtime::BackendFactory;
-use std::time::Instant;
+use std::{env, time::Instant};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let model_path = "/home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf";
+    let mut args = env::args();
+    let bin = args.next().unwrap_or_else(|| "debug_logits".to_string());
+    let model_path = args.next().unwrap_or_else(|| {
+        eprintln!("Usage: {bin} <path_to.gguf>");
+        std::process::exit(2);
+    });
 
     let start = Instant::now();
-    let mut ctx = InferenceContext::from_gguf(model_path, BackendFactory::cpu())?;
+    let mut ctx = InferenceContext::from_gguf(&model_path, BackendFactory::cpu())?;
     eprintln!("Loaded in {:.2}s", start.elapsed().as_secs_f64());
 
     eprintln!(

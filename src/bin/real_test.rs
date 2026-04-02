@@ -14,8 +14,11 @@ use powerinfer::sysinfo::MemoryGuard;
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let model_path = env::args().nth(1).unwrap_or_else(|| {
-        "/home/jon/models/llama-cache/Qwen3-4B-Instruct-2507-Q4_K_M.gguf".to_string()
+    let mut args = env::args();
+    let bin = args.next().unwrap_or_else(|| "real_test".to_string());
+    let model_path = args.next().unwrap_or_else(|| {
+        eprintln!("Usage: {bin} <path_to.gguf>");
+        std::process::exit(2);
     });
 
     println!("=== PowerInfer_x64 Real Model Test ===");

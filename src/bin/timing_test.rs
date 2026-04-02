@@ -14,9 +14,12 @@ use powerinfer::weights::Weights;
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let model_path = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "/home/jon/models/llama-cache/Arch-Agent-3B.Q8_0.gguf".to_string());
+    let mut args = env::args();
+    let bin = args.next().unwrap_or_else(|| "timing_test".to_string());
+    let model_path = args.next().unwrap_or_else(|| {
+        eprintln!("Usage: {bin} <path_to.gguf>");
+        std::process::exit(2);
+    });
 
     println!("=== Timing Debug Test ===\n");
 
