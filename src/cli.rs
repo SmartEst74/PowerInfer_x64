@@ -39,7 +39,11 @@ enum Commands {
 
         /// Temperature for sampling
         #[arg(long, default_value_t = 0.7)]
-        _temperature: f32,
+        temperature: f32,
+
+        /// Nucleus sampling cutoff
+        #[arg(long, default_value_t = 1.0)]
+        top_p: f32,
 
         /// Threads for CPU parallelization
         #[arg(short, long, default_value_t = num_cpus::get())]
@@ -56,6 +60,12 @@ enum Commands {
         prompts: Vec<PathBuf>,
         #[arg(long, default_value_t = 1000)]
         samples: usize,
+        #[arg(long, default_value_t = 0)]
+        layers: usize,
+        #[arg(long, default_value_t = 0.5)]
+        threshold: f32,
+        #[arg(long, default_value_t = 0.05)]
+        min_hotness: f64,
     },
 
     /// Start OpenAI-compatible server
@@ -83,7 +93,8 @@ fn main() -> anyhow::Result<()> {
             n,
             gpu_layers,
             _hot_index: _,
-            _temperature: _,
+            temperature,
+            top_p,
             _threads: _,
         } => {
             if let Some(prompt) = prompt {
@@ -103,7 +114,15 @@ fn main() -> anyhow::Result<()> {
                 };
 
                 let mut ctx = powerinfer::model::InferenceContext::from_gguf(model, backend)?;
-                let output = ctx.generate(prompt, n)?;
+                let output = ctx.generate_with_options(
+                    prompt,
+                    powerinfer::GenerationOptions {
+                        max_tokens: n,
+                        temperature,
+                        top_p,
+                        ..powerinfer::GenerationOptions::default()
+                    },
+                )?;
                 println!("{output}");
             } else {
                 eprintln!("Error: prompt is required");
@@ -115,14 +134,43 @@ fn main() -> anyhow::Result<()> {
             ref output,
             ref prompts,
             samples,
+            layers,
+            threshold,
+            min_hotness,
         } => {
             eprintln!("Profiling model: {model:?}");
             eprintln!("Output: {output:?}");
             eprintln!("Prompts: {prompts:?}");
             eprintln!("Samples: {samples}");
-            anyhow::bail!(
-                "activation profiling is not wired into the forward pass yet; use the standalone profiler only for model inspection until hot-index generation is implemented"
-            );
+            let mut prompt_texts = powerinfer::activation::load_prompts_from_files(prompts)?;
+            if prompt_texts.is_empty() {
+                prompt_texts = powerinfer::activation::default_profile_prompts();
+                eprintln!("No prompt files provided; using built-in smoke prompts.");
+            }
+
+            let mut ctx = powerinfer::model::InferenceContext::from_gguf(
+                model,
+                powerinfer::runtime::BackendFactory::cpu(),
+            )?;
+            let result = powerinfer::activation::run_activation_profiling(
+                &mut ctx,
+                &prompt_texts,
+                (layers > 0).then_some(layers),
+                threshold,
+                min_hotness,
+                samples,
+            )?;
+            result.hot_index.save(output)?;
+
+            eprintln!("{}", result.profile.summary());
+            eprintln!("Prompts processed: {}", result.prompts_processed);
+            eprintln!("Layers profiled: {}", result.hot_index.layers.len());
+            if ctx.config().moe.is_some() {
+                eprintln!(
+                    "MoE note: profiled indices currently reflect router expert hotness on MoE layers; dense FFN layers still record neuron activations."
+                );
+            }
+            eprintln!("Saved hot index to {output:?}");
         }
         Commands::Serve {
             ref model,

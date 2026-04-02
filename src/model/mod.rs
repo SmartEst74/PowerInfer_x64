@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use crate::activation::ActivationRecorder;
 use crate::gguf::{GgufFile, SsmConfig};
 use crate::ops;
 use crate::quant::QuantizationType;
@@ -120,6 +121,37 @@ pub struct InferenceContext {
     hw_profile: Option<HardwareProfile>,
     /// Execution plan (filled on startup)
     exec_plan: Option<ExecutionPlan>,
+    /// Optional activation recorder used by profiling runs.
+    activation_recorder: Option<ActivationRecorder>,
+}
+
+/// Generation controls for text decoding.
+#[derive(Debug, Clone, Copy)]
+pub struct GenerationOptions {
+    pub max_tokens: usize,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub seed: u64,
+}
+
+impl GenerationOptions {
+    pub fn greedy(max_tokens: usize) -> Self {
+        Self {
+            max_tokens,
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for GenerationOptions {
+    fn default() -> Self {
+        Self {
+            max_tokens: 64,
+            temperature: 0.0,
+            top_p: 1.0,
+            seed: 0xD1CE_F00D_FEE1_DEAD,
+        }
+    }
 }
 
 impl InferenceContext {
@@ -210,18 +242,34 @@ impl InferenceContext {
             ssm_conv_states,
             hw_profile: Some(hw_profile),
             exec_plan: Some(exec_plan),
+            activation_recorder: None,
         })
     }
 
     /// Generate text given a prompt
     pub fn generate(&mut self, prompt: &str, max_tokens: usize) -> Result<String> {
-        let (output, _) = self.generate_timed(prompt, max_tokens)?;
+        let (output, _) = self.generate_timed_with_options(prompt, GenerationOptions::greedy(max_tokens))?;
+        Ok(output)
+    }
+
+    /// Generate text with sampling options.
+    pub fn generate_with_options(&mut self, prompt: &str, options: GenerationOptions) -> Result<String> {
+        let (output, _) = self.generate_timed_with_options(prompt, options)?;
         Ok(output)
     }
 
     /// Generate text and return per-token timing (seconds per token).
     /// First entry is prefill time, remaining are decode times.
     pub fn generate_timed(&mut self, prompt: &str, max_tokens: usize) -> Result<(String, Vec<f64>)> {
+        self.generate_timed_with_options(prompt, GenerationOptions::greedy(max_tokens))
+    }
+
+    /// Generate text and return per-token timing with sampling controls.
+    pub fn generate_timed_with_options(
+        &mut self,
+        prompt: &str,
+        options: GenerationOptions,
+    ) -> Result<(String, Vec<f64>)> {
         self.reset();
 
         let input_ids = self.tokenizer.encode(prompt);
@@ -233,6 +281,7 @@ impl InferenceContext {
         let eos_id = self.tokenizer.eos_token_id();
         let mut generated = Vec::new();
         let mut token_times = Vec::new();
+        let mut rng = SplitMix64::new(options.seed);
 
         // Prefill: process all prompt tokens
         let t0 = std::time::Instant::now();
@@ -253,8 +302,8 @@ impl InferenceContext {
         }
 
         // Decode loop
-        for _ in 0..max_tokens {
-            let next_token = sample_argmax(&logits);
+        for _ in 0..options.max_tokens {
+            let next_token = sample_token(&logits, options.temperature, options.top_p, &mut rng);
 
             // Check for EOS
             if Some(next_token) == eos_id {
@@ -293,6 +342,7 @@ impl InferenceContext {
         let rms_eps = self.config.rms_epsilon;
         let rope_freq_base = self.config.rope_freq_base;
         let n_tokens = tokens.len();
+        let activation_recorder = self.activation_recorder.clone();
 
         // --- Embedding lookup ---
         // token_embd.weight [ne0=n_embd, ne1=n_vocab] in GGML col-major
@@ -762,6 +812,14 @@ impl InferenceContext {
                     });
                     ranked.truncate(top_k);
 
+                    if let Some(recorder) = &activation_recorder {
+                        let mut expert_hits = vec![0.0f32; n_experts];
+                        for &expert_idx in &ranked {
+                            expert_hits[expert_idx] = 1.0;
+                        }
+                        recorder.record(layer_idx, &expert_hits);
+                    }
+
                     // Sort experts by index for sequential mmap access pattern
                     ranked.sort_unstable();
 
@@ -891,6 +949,20 @@ impl InferenceContext {
                     let ffn_down_t = self.weights.get(&format!("{prefix}.ffn_down.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_down.weight not found"))?;
                     let n_ff = self.config.feed_forward_length;
+
+                    if let Some(recorder) = &activation_recorder {
+                        self.record_dense_ffn_activations(
+                            recorder,
+                            layer_idx,
+                            &normed,
+                            ffn_gate_t.raw(),
+                            ffn_up_t.raw(),
+                            ffn_gate_t.qtype,
+                            n_embd,
+                            n_ff,
+                        )?;
+                    }
+
                     crate::quant::ffn_swiglu_q(
                         &mut ffn_out, &normed,
                         ffn_gate_t.raw(), ffn_up_t.raw(), ffn_down_t.raw(),
@@ -982,6 +1054,40 @@ impl InferenceContext {
         self.exec_plan.as_ref()
     }
 
+    /// Configure an activation recorder for profiling.
+    pub fn set_activation_recorder(&mut self, recorder: ActivationRecorder) {
+        self.activation_recorder = Some(recorder);
+    }
+
+    /// Remove the activation recorder after profiling.
+    pub fn clear_activation_recorder(&mut self) {
+        self.activation_recorder = None;
+    }
+
+    /// Determine the activation width recorded for each profiled layer.
+    pub fn profiling_layer_dims(&self, layer_limit: Option<usize>) -> Vec<usize> {
+        let limit = layer_limit
+            .unwrap_or(self.config.block_count)
+            .min(self.config.block_count);
+
+        (0..limit)
+            .map(|layer_idx| {
+                let prefix = format!("blk.{layer_idx}");
+                if self.weights.has(&format!("{prefix}.ffn_gate_exps.weight")) {
+                    self.config
+                        .moe
+                        .map(|moe| moe.expert_count)
+                        .unwrap_or(self.config.feed_forward_length)
+                } else {
+                    self.weights
+                        .get(&format!("{prefix}.ffn_gate.weight"))
+                        .and_then(|tensor| tensor.shape.get(1).copied())
+                        .unwrap_or(self.config.feed_forward_length)
+                }
+            })
+            .collect()
+    }
+
     /// Enable TurboQuant compressed KV cache
     /// Call before generation. Existing caches are cleared.
     pub fn enable_compressed_cache(&mut self) {
@@ -1050,6 +1156,33 @@ impl InferenceContext {
             conv_state.clear();
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_dense_ffn_activations(
+        &self,
+        recorder: &ActivationRecorder,
+        layer_idx: usize,
+        normed: &[f32],
+        gate_raw: &[u8],
+        up_raw: &[u8],
+        qtype: QuantizationType,
+        n_embd: usize,
+        n_ff: usize,
+    ) -> Result<()> {
+        let mut gate = vec![0.0f32; n_ff];
+        let mut up = vec![0.0f32; n_ff];
+
+        crate::quant::matvec_col_major(&mut gate, normed, gate_raw, qtype, n_embd, n_ff)?;
+        crate::quant::matvec_col_major(&mut up, normed, up_raw, qtype, n_embd, n_ff)?;
+
+        for i in 0..n_ff {
+            let sig = 1.0 / (1.0 + (-gate[i]).exp());
+            gate[i] = gate[i] * sig * up[i];
+        }
+
+        recorder.record(layer_idx, &gate);
+        Ok(())
+    }
 }
 
 /// Greedy sampling: pick the token with highest logit
@@ -1063,6 +1196,114 @@ fn sample_argmax(logits: &[f32]) -> u32 {
         }
     }
     best_id
+}
+
+fn sample_token(logits: &[f32], temperature: f32, top_p: f32, rng: &mut SplitMix64) -> u32 {
+    if !temperature.is_finite() || temperature <= 0.0 {
+        return sample_argmax(logits);
+    }
+
+    let temperature = temperature.max(1e-5);
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut weights = Vec::with_capacity(logits.len());
+    let mut total = 0.0f64;
+
+    for &logit in logits {
+        let weight = ((logit - max_logit) / temperature).exp() as f64;
+        if weight.is_finite() {
+            total += weight;
+            weights.push(weight);
+        } else {
+            weights.push(0.0);
+        }
+    }
+
+    if total <= 0.0 || !total.is_finite() {
+        return sample_argmax(logits);
+    }
+
+    let top_p = if top_p.is_finite() {
+        top_p.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+
+    if top_p >= 0.999_999 {
+        return sample_from_weight_slice(&weights, total, rng);
+    }
+
+    let mut ranked: Vec<(usize, f64)> = weights.iter().copied().enumerate().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut truncated = Vec::new();
+    let mut cumulative = 0.0f64;
+    for (idx, weight) in ranked {
+        if weight <= 0.0 {
+            continue;
+        }
+        cumulative += weight / total;
+        truncated.push((idx, weight));
+        if cumulative >= top_p as f64 {
+            break;
+        }
+    }
+
+    if truncated.is_empty() {
+        return sample_argmax(logits);
+    }
+
+    let truncated_total: f64 = truncated.iter().map(|(_, weight)| weight).sum();
+    let draw = rng.next_f64() * truncated_total;
+    let mut acc = 0.0f64;
+    for (idx, weight) in truncated {
+        acc += weight;
+        if draw <= acc {
+            return idx as u32;
+        }
+    }
+
+    sample_argmax(logits)
+}
+
+fn sample_from_weight_slice(weights: &[f64], total: f64, rng: &mut SplitMix64) -> u32 {
+    let draw = rng.next_f64() * total;
+    let mut acc = 0.0f64;
+
+    for (idx, weight) in weights.iter().copied().enumerate() {
+        acc += weight;
+        if draw <= acc {
+            return idx as u32;
+        }
+    }
+
+    sample_argmax(
+        &weights
+            .iter()
+            .map(|weight| *weight as f32)
+            .collect::<Vec<_>>(),
+    )
+}
+
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
 }
 
 /// Prefetch mmap pages into OS page cache using madvise(MADV_WILLNEED).

@@ -78,7 +78,9 @@ cargo run --release --bin real_test -- /path/to/model.gguf
 cargo run --release --bin powerinfer-cli -- generate \
     --model /path/to/model.gguf \
     --prompt "The capital of France is" \
-    -n 1
+    -n 4 \
+    --temperature 0.7 \
+    --top-p 0.9
 ```
 
 ### Start the HTTP server
@@ -87,17 +89,20 @@ cargo run --release --bin powerinfer-cli -- generate \
 cargo run --release --features server --bin powerinfer-serve -- /path/to/model.gguf
 ```
 
-Current limitation: the server returns real model output for basic requests, but it is still greedy-only and does not implement streaming.
+Current limitation: the server returns real model output for basic sampled requests, but it is still non-streaming and serializes requests through one model lock.
 
-### Run the profiler scaffold
+### Run the profiler
 
 ```bash
 cargo run --release --features profiling --bin powerinfer-profile -- \
     --model /path/to/model.gguf \
-    --output profile.jsonl
+    --output hot_index.json \
+    --prompt-file prompts.txt
 ```
 
-Current limitation: the profiler currently performs model analysis only, then exits with a clear unsupported error. It does not generate a finished hot-neuron profile or index.
+If no prompt file is provided, the profiler uses a small built-in smoke prompt set.
+
+Current limitation: the profiler now emits a JSON hot index, but the runtime does not consume it yet and MoE layers currently export expert hotness rather than per-expert neuron hotness.
 
 ### Inspect GGUF metadata
 

@@ -47,7 +47,7 @@ pub mod server;
 
 // Re-exports
 pub use gguf::GgufFile;
-pub use model::{InferenceContext, ModelConfig};
+pub use model::{GenerationOptions, InferenceContext, ModelConfig};
 
 /// Result type alias with anyhow::Error
 pub type Result<T> = std::result::Result<T, anyhow::Error>;

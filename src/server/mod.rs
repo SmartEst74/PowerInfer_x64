@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tower_http::cors::{CorsLayer, Any};
 use tracing::info;
 
-use crate::InferenceContext;
+use crate::{GenerationOptions, InferenceContext};
 use crate::metrics::{Metrics, SharedMetrics};
 
 /// Application state shared across requests
@@ -96,6 +96,7 @@ pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub max_tokens: Option<usize>,
     pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
     pub stream: Option<bool>,
 }
 
@@ -117,6 +118,24 @@ fn build_chat_prompt(messages: &[ChatMessage]) -> String {
         .join("\n")
 }
 
+fn request_generation_options(
+    max_tokens: Option<usize>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+) -> GenerationOptions {
+    let seed = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .map(|value| value as u64)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_micros() as u64);
+
+    GenerationOptions {
+        max_tokens: request_token_budget(max_tokens),
+        temperature: temperature.unwrap_or(0.0),
+        top_p: top_p.unwrap_or(1.0),
+        seed,
+    }
+}
+
 fn validate_generation_options(
     stream: Option<bool>,
     temperature: Option<f32>,
@@ -126,16 +145,18 @@ fn validate_generation_options(
         return Err(ApiError::bad_request("streaming responses are not implemented"));
     }
 
-    if temperature.unwrap_or(0.0) != 0.0 {
-        return Err(ApiError::bad_request(
-            "sampling is not implemented; use temperature 0.0",
-        ));
+    if let Some(temperature) = temperature {
+        if !temperature.is_finite() || temperature < 0.0 {
+            return Err(ApiError::bad_request(
+                "temperature must be a finite value greater than or equal to 0.0",
+            ));
+        }
     }
 
     if let Some(top_p) = top_p {
-        if (top_p - 1.0).abs() > f32::EPSILON {
+        if !top_p.is_finite() || top_p <= 0.0 || top_p > 1.0 {
             return Err(ApiError::bad_request(
-                "top_p sampling is not implemented; omit top_p or use 1.0",
+                "top_p must be a finite value in the range (0.0, 1.0]",
             ));
         }
     }
@@ -303,7 +324,10 @@ async fn handle_completions(
 
     let text = {
         let mut model = state.model.lock().await;
-        model.generate(&req.prompt, request_token_budget(req.max_tokens))?
+        model.generate_with_options(
+            &req.prompt,
+            request_generation_options(req.max_tokens, req.temperature, req.top_p),
+        )?
     };
 
     let resp = make_completion_response(req.model, text);
@@ -326,7 +350,7 @@ async fn handle_chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Json<ChatCompletionResponse>, ApiError> {
-    validate_generation_options(req.stream, req.temperature, None)?;
+    validate_generation_options(req.stream, req.temperature, req.top_p)?;
 
     let timer = state.metrics.inference_duration_seconds
         .with_label_values(&["chat"])
@@ -339,7 +363,10 @@ async fn handle_chat_completions(
     let prompt = build_chat_prompt(&req.messages);
     let text = {
         let mut model = state.model.lock().await;
-        model.generate(&prompt, request_token_budget(req.max_tokens))?
+        model.generate_with_options(
+            &prompt,
+            request_generation_options(req.max_tokens, req.temperature, req.top_p),
+        )?
     };
 
     let resp = make_chat_response(req.model, text);
@@ -432,9 +459,10 @@ mod tests {
     fn test_validate_generation_options() {
         assert!(validate_generation_options(None, None, None).is_ok());
         assert!(validate_generation_options(Some(false), Some(0.0), Some(1.0)).is_ok());
+        assert!(validate_generation_options(None, Some(0.7), Some(0.9)).is_ok());
         assert!(validate_generation_options(Some(true), None, None).is_err());
-        assert!(validate_generation_options(None, Some(0.7), None).is_err());
-        assert!(validate_generation_options(None, None, Some(0.9)).is_err());
+        assert!(validate_generation_options(None, Some(-0.1), None).is_err());
+        assert!(validate_generation_options(None, None, Some(1.1)).is_err());
     }
 
     #[test]

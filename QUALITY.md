@@ -12,18 +12,22 @@ cargo clippy --all-targets -- -D warnings
 cargo run --release --bin gguf_dump -- /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf
 cargo run --release --bin real_test -- /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf
 cargo run --release --bin powerinfer-cli -- generate --model /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf --prompt "The capital of France is" -n 1
+cargo run --release --bin powerinfer-cli -- generate --model /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf --prompt "The capital of France is" -n 4 --temperature 0.7 --top-p 0.9
+cargo run --release --features profiling --bin powerinfer-profile -- --model /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf --output /tmp/powerinfer-hot-index.json --samples 2 --layers 2
 cargo test --features server
 cargo clippy --all-targets --features server -- -D warnings
+cargo test --features 'server profiling'
 ```
 
 ## Code Health
 
 | Check | Result |
 |-------|--------|
-| `cargo test` | 81 passed, 2 ignored, 0 failed |
+| `cargo test` | 82 passed, 2 ignored, 0 failed |
 | `cargo clippy --all-targets -- -D warnings` | PASS |
 | `cargo test --features server` | PASS |
 | `cargo clippy --all-targets --features server -- -D warnings` | PASS |
+| `cargo test --features 'server profiling'` | PASS |
 | Ignored tests | 2 path-dependent quality checks for alternate local GGUFs |
 
 ## Current Real-Model Benchmark
@@ -99,6 +103,8 @@ Quality interpretation:
 - Quantization and dequantization unit coverage for Q4_0, Q8_0, Q4_1, Q4_K, Q5_K, Q6_K, F16, and F32 paths.
 - TurboQuant KV path wiring in the current forward implementation.
 - HTTP server routes that return real model-backed completions and chat completions in release mode.
+- Basic temperature/top-p sampling through both the CLI and HTTP server.
+- Basic hot-index export from the profiler and `powerinfer-cli profile`.
 
 ## Known Gaps
 
@@ -109,7 +115,9 @@ Quality interpretation:
 | Sparse hot-neuron GPU execution | Not implemented |
 | Reference comparison against llama.cpp | Open |
 | Server-backed real completions | Verified, basic |
-| Profiler hot-index generation | Not implemented |
+| Server-side basic sampling | Verified, basic |
+| Profiler hot-index generation | Verified, basic |
+| Runtime use of hot-index output | Not implemented |
 | Benchmark regression CI | Open |
 
 ## Server Validation
@@ -135,8 +143,33 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 Observed behavior:
 - `/v1/models` reports `Qwen3.5-35B-A3B`.
 - `/v1/completions` returned model-generated text from the loaded GGUF rather than a dummy payload.
+- Sampled `/v1/completions` and `/v1/chat/completions` requests succeeded with `temperature=0.7` and `top_p=0.9`.
 - `/v1/chat/completions` returned a real chat-completion payload rather than a dummy response.
-- The server is still greedy-only and rejects unsupported streaming/sampling options instead of pretending to implement them.
+- The server still rejects streaming requests explicitly.
+
+## Profiler Validation
+
+Validated profiler commands:
+
+```bash
+cargo run --release --features profiling --bin powerinfer-profile -- \
+	--model /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf \
+	--output /tmp/powerinfer-hot-index.json \
+	--samples 2 \
+	--layers 2
+
+cargo run --release --bin powerinfer-cli -- profile \
+	--model /home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf \
+	--output /tmp/powerinfer-hot-index-cli.json \
+	--samples 2 \
+	--layers 2
+```
+
+Observed behavior:
+- Both entry points produced a real JSON hot-index file rather than exiting with a placeholder message.
+- For the validated Qwen3.5 MoE path, the current profiler records expert selection hotness on MoE layers.
+- With the default `min_hotness=0.05`, the exported MoE hot-index file contained non-empty expert lists for the sampled layers.
+- The exported index is not consumed by the runtime yet.
 
 ## Open Issues
 

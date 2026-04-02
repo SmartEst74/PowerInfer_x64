@@ -4,7 +4,8 @@
 //! consistently activate. Produces a "hot neuron index" used to decide which
 //! neurons stay on GPU vs CPU.
 
-use std::path::Path;
+use anyhow::{anyhow, Result};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Activation statistics for a single neuron
@@ -72,10 +73,17 @@ pub struct ActivationProfile {
 impl ActivationProfile {
     /// Create a new empty profile
     pub fn new(n_layers: usize, n_ff: usize, threshold: f32) -> Self {
-        let layers = (0..n_layers)
-            .map(|layer_idx| LayerProfile {
+        Self::new_with_dims(&vec![n_ff; n_layers], threshold)
+    }
+
+    /// Create a new empty profile with per-layer activation widths.
+    pub fn new_with_dims(layer_dims: &[usize], threshold: f32) -> Self {
+        let layers = layer_dims
+            .iter()
+            .enumerate()
+            .map(|(layer_idx, &width)| LayerProfile {
                 layer_idx,
-                neurons: (0..n_ff).map(|_| NeuronStats::new()).collect(),
+                neurons: (0..width).map(|_| NeuronStats::new()).collect(),
             })
             .collect();
 
@@ -88,14 +96,17 @@ impl ActivationProfile {
 
     /// Record activations for one layer
     pub fn record_layer(&mut self, layer_idx: usize, gate_activations: &[f32]) {
-        let layer = &mut self.layers[layer_idx];
-        for (i, &act) in gate_activations.iter().enumerate() {
+        let Some(layer) = self.layers.get_mut(layer_idx) else {
+            return;
+        };
+
+        for (stats, &act) in layer.neurons.iter_mut().zip(gate_activations.iter()) {
             let mag = act.abs();
-            layer.neurons[i].samples += 1;
-            layer.neurons[i].magnitude_sum += mag as f64;
-            layer.neurons[i].max_magnitude = layer.neurons[i].max_magnitude.max(mag);
+            stats.samples += 1;
+            stats.magnitude_sum += mag as f64;
+            stats.max_magnitude = stats.max_magnitude.max(mag);
             if mag > self.threshold {
-                layer.neurons[i].hot_count += 1;
+                stats.hot_count += 1;
             }
         }
     }
@@ -158,11 +169,17 @@ impl ActivationProfile {
 
         hot_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
+        let hot_fraction = if total_neurons == 0 {
+            0.0
+        } else {
+            total_hot as f64 / total_neurons as f64
+        };
+
         ProfileSummary {
             total_samples: self.total_samples,
             total_neurons,
             hot_neurons_at_50pct: total_hot,
-            hot_fraction: total_hot as f64 / total_neurons as f64,
+            hot_fraction,
             median_hotness: hot_ratios.get(total_neurons / 2).copied().unwrap_or(0.0),
             p90_hotness: hot_ratios
                 .get((total_neurons as f64 * 0.9) as usize)
@@ -244,6 +261,11 @@ pub struct HotLayer {
 impl HotNeuronIndex {
     /// Save to JSON file
     pub fn save<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
+        if let Some(parent) = path.as_ref().parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
@@ -300,6 +322,98 @@ impl ActivationRecorder {
     pub fn snapshot(&self) -> ActivationProfile {
         self.inner.lock().unwrap().clone()
     }
+}
+
+/// Result of a profiling run over a prompt set.
+#[derive(Debug, Clone)]
+pub struct ProfilingRun {
+    pub profile: ActivationProfile,
+    pub hot_index: HotNeuronIndex,
+    pub prompts_processed: usize,
+}
+
+/// Built-in smoke prompts used when no prompt files are provided.
+pub fn default_profile_prompts() -> Vec<String> {
+    vec![
+        "The capital of France is".to_string(),
+        "Rust is a systems programming language that".to_string(),
+        "Explain in one sentence what a GPU is.".to_string(),
+        "List three uses for a local language model.".to_string(),
+    ]
+}
+
+/// Load prompts from one or more newline-delimited text files.
+pub fn load_prompts_from_files(prompt_files: &[PathBuf]) -> Result<Vec<String>> {
+    let mut prompts = Vec::new();
+
+    for prompt_file in prompt_files {
+        let contents = std::fs::read_to_string(prompt_file)?;
+        prompts.extend(
+            contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+
+    Ok(prompts)
+}
+
+/// Run activation profiling over a set of prompts using the provided inference context.
+pub fn run_activation_profiling(
+    ctx: &mut crate::model::InferenceContext,
+    prompts: &[String],
+    layer_limit: Option<usize>,
+    threshold: f32,
+    min_hotness: f64,
+    max_samples: usize,
+) -> Result<ProfilingRun> {
+    if prompts.is_empty() {
+        return Err(anyhow!("no prompts provided for activation profiling"));
+    }
+
+    let layer_dims = ctx.profiling_layer_dims(layer_limit);
+    if layer_dims.is_empty() {
+        return Err(anyhow!("no layers available for activation profiling"));
+    }
+
+    let recorder = ActivationRecorder::new(ActivationProfile::new_with_dims(&layer_dims, threshold));
+    ctx.set_activation_recorder(recorder.clone());
+
+    let mut prompts_processed = 0;
+    let sample_budget = max_samples.max(1);
+
+    for prompt in prompts {
+        if prompts_processed >= sample_budget {
+            break;
+        }
+
+        let input_ids = ctx.tokenizer().encode(prompt);
+        if input_ids.is_empty() {
+            continue;
+        }
+
+        ctx.reset();
+        ctx.forward(&input_ids)?;
+        recorder.finish_sample();
+        prompts_processed += 1;
+    }
+
+    ctx.clear_activation_recorder();
+
+    if prompts_processed == 0 {
+        return Err(anyhow!("no non-empty prompts were processed during activation profiling"));
+    }
+
+    let profile = recorder.snapshot();
+    let hot_index = profile.export_hot_index(min_hotness);
+
+    Ok(ProfilingRun {
+        profile,
+        hot_index,
+        prompts_processed,
+    })
 }
 
 #[cfg(test)]
@@ -402,5 +516,19 @@ mod tests {
         // 3 hot * 128 * 4 (gate) + 3 * 128 * 4 (up) + 128 * 3 * 4 (down) = 4608
         let mem = index.gpu_memory_estimate(128);
         assert_eq!(mem, 4608);
+    }
+
+    #[test]
+    fn test_variable_layer_width_profile() {
+        let mut profile = ActivationProfile::new_with_dims(&[2, 4], 0.5);
+        profile.record_layer(0, &[1.0, 0.1, 9.9]);
+        profile.record_layer(1, &[0.1, 0.9, 0.2, 0.8, 9.9]);
+        profile.finish_sample();
+
+        assert_eq!(profile.layers[0].neurons.len(), 2);
+        assert_eq!(profile.layers[1].neurons.len(), 4);
+        assert_eq!(profile.layers[0].neurons[0].hot_count, 1);
+        assert_eq!(profile.layers[1].neurons[1].hot_count, 1);
+        assert_eq!(profile.layers[1].neurons[3].hot_count, 1);
     }
 }
