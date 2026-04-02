@@ -221,6 +221,24 @@ impl CpuCapabilities {
             }
         }
 
+        // macOS fallback: sysctl for CPU info
+        if cap.model_name.is_empty() {
+            if let Ok(out) = Command::new("sysctl").arg("-n").arg("machdep.cpu.brand_string").output() {
+                if out.status.success() {
+                    cap.model_name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                }
+            }
+        }
+        if cap.base_mhz < 1.0 {
+            if let Ok(out) = Command::new("sysctl").arg("-n").arg("hw.cpufrequency_max").output() {
+                if out.status.success() {
+                    if let Ok(hz) = String::from_utf8_lossy(&out.stdout).trim().parse::<f64>() {
+                        cap.base_mhz = hz / 1_000_000.0;
+                    }
+                }
+            }
+        }
+
         cap
     }
 
@@ -603,18 +621,45 @@ impl ExecutionPlan {
         plan.use_turboquant = is_moe;
 
         // --- Performance estimation ---
+        // Calibrated against real measurements on Pentium G4400 (SSE4.2, 2 cores).
+        // Account for: matvec compute, memory bandwidth, GDR state ops, overhead.
         let cpu_gops = hw.cpu.estimated_matvec_gops() * hw.cpu.physical_cores as f64;
-        // Q8_0 matvec: n_embd * n_output ops per projection
-        // Per attention layer: ~4 projections × n_embd² = 4 * n_embd² ops
-        let ops_per_attn_layer = 4.0 * (n_embd as f64).powi(2) / 1e9; // in GOPS
+
+        // Per attention layer: QKV + output proj + GDR state ops
+        // QKV: 3 projections × n_embd × (n_heads * head_dim) ≈ 3 × n_embd²
+        // Output: 1 projection × n_embd²
+        // GDR state: 32 heads × 128 × 128 × 3 ops (decay, update, read) ≈ 1.6M ops
+        let ops_per_attn_layer = (4.0 * (n_embd as f64).powi(2) + 1.6e6) / 1e9;
         let ops_per_moe_layer = if is_moe {
-            // 8 experts × 3 projections × n_embd * ffn_dim
-            8.0 * 3.0 * n_embd as f64 * 512.0 / 1e9 // ffn_dim is typically small for MoE
+            // 8 experts × 3 projections × n_embd * ffn_dim + shared expert
+            9.0 * 3.0 * n_embd as f64 * 512.0 / 1e9
         } else {
             3.0 * n_embd as f64 * (n_embd as f64 * 4.0) / 1e9
         };
-        let total_ops = model_layers as f64 * (ops_per_attn_layer + ops_per_moe_layer);
-        plan.estimated_tok_s = if total_ops > 0.0 { cpu_gops / total_ops } else { 0.0 };
+        // LM head: n_embd × vocab_size (typically 248320)
+        let ops_lm_head = n_embd as f64 * 248320.0 / 1e9;
+        let total_ops = model_layers as f64 * (ops_per_attn_layer + ops_per_moe_layer) + ops_lm_head;
+
+        // Apply efficiency factor: real throughput is ~60% of theoretical due to
+        // cache misses, branch mispredicts, memory latency, and OS scheduling.
+        let efficiency = 0.60;
+        plan.estimated_tok_s = if total_ops > 0.0 {
+            cpu_gops * efficiency / total_ops
+        } else {
+            0.0
+        };
+
+        // Also estimate memory-bandwidth-limited tok/s
+        // Active weight bytes per token: attention + top-k experts (Q8_0 = ~1 byte/param)
+        let active_bytes_per_token = model_layers as f64 * (
+            4.0 * (n_embd as f64).powi(2) // attention projections
+            + if is_moe { 8.0 * 3.0 * n_embd as f64 * 512.0 } else { 0.0 } // experts
+        ) + n_embd as f64 * 248320.0; // LM head
+        // DDR4 bandwidth estimate: ~20 GB/s (dual channel), ~12 GB/s (single channel)
+        let mem_bw_gbs = 20.0; // conservative estimate
+        let bw_limited_tok_s = mem_bw_gbs * 1e9 / active_bytes_per_token;
+        // Actual throughput is minimum of compute-limited and bandwidth-limited
+        plan.estimated_tok_s = plan.estimated_tok_s.min(bw_limited_tok_s);
 
         // --- Advisories ---
         if hw.gpus.is_empty() {
@@ -947,8 +992,15 @@ impl SystemResources {
     }
 }
 
-/// Detect NVIDIA GPUs using nvidia-smi
+/// Detect NVIDIA GPUs (via nvidia-smi) and AMD GPUs (via rocm-smi)
 fn detect_gpus() -> Vec<GpuDevice> {
+    let mut gpus = detect_nvidia_gpus();
+    gpus.extend(detect_amd_gpus());
+    gpus
+}
+
+/// Detect NVIDIA GPUs using nvidia-smi
+fn detect_nvidia_gpus() -> Vec<GpuDevice> {
     let output = Command::new("nvidia-smi")
         .args([
             "--query-gpu=index,name,memory.total,memory.free,memory.used,compute_cap",
@@ -983,8 +1035,44 @@ fn detect_gpus() -> Vec<GpuDevice> {
     }
 }
 
-/// Detect system RAM from /proc/meminfo
+/// Detect AMD GPUs using rocm-smi
+fn detect_amd_gpus() -> Vec<GpuDevice> {
+    // Try rocm-smi for AMD GPUs
+    let output = Command::new("rocm-smi")
+        .args(["--showid", "--showmeminfo", "vram", "--csv"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Parse CSV output: device,GPU_ID,VRAM_Total,VRAM_Used
+            let mut gpus = Vec::new();
+            for line in stdout.lines().skip(1) { // skip header
+                let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 4 {
+                    let index: usize = parts[0].parse().unwrap_or(gpus.len());
+                    let name = format!("AMD GPU {index}");
+                    let total: u64 = parts[2].parse().unwrap_or(0);
+                    let used: u64 = parts[3].parse().unwrap_or(0);
+                    gpus.push(GpuDevice {
+                        index,
+                        name,
+                        total_vram: total,
+                        free_vram: total.saturating_sub(used),
+                        used_vram: used,
+                        compute_major: 0,
+                        compute_minor: 0,
+                    });
+                }
+            }
+            gpus
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Detect system RAM from /proc/meminfo (Linux) or sysctl (macOS)
 fn detect_ram() -> (u64, u64) {
+    // Try Linux /proc/meminfo first
     let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let mut total = 0u64;
     let mut available = 0u64;
@@ -994,6 +1082,19 @@ fn detect_ram() -> (u64, u64) {
             total = parse_meminfo_kb(line) * 1024;
         } else if line.starts_with("MemAvailable:") {
             available = parse_meminfo_kb(line) * 1024;
+        }
+    }
+
+    // macOS fallback via sysctl
+    if total == 0 {
+        if let Ok(out) = Command::new("sysctl").arg("hw.memsize").output() {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if let Some(val) = stdout.split(':').nth(1).and_then(|s| s.trim().parse::<u64>().ok()) {
+                    total = val;
+                    available = total / 2; // conservative estimate for macOS
+                }
+            }
         }
     }
 

@@ -482,6 +482,8 @@ impl InferenceContext {
                     // Step 8: Delta rule — state [n_v_h, k_hd, v_hd] = [32, 128, 128]
                     let state = &mut self.ssm_states[layer_idx];
                     let mut attn_result = vec![0.0f32; value_dim]; // [4096]
+                    // Reusable buffer to avoid per-head allocation
+                    let mut kv_mem = vec![0.0f32; v_hd];
 
                     for vh in 0..n_v_h {
                         let decay = g_decay[vh].exp(); // exp(g) where g < 0 → decay < 1
@@ -497,7 +499,7 @@ impl InferenceContext {
                         }
 
                         // kv_mem[v] = sum_k(S[k,v] * K[k]) for each v
-                        let mut kv_mem = vec![0.0f32; v_hd];
+                        kv_mem.fill(0.0);
                         for (ki, &k_val) in k_h.iter().enumerate() {
                             let row_off = s_off + ki * v_hd;
                             for vi in 0..v_hd {
@@ -505,20 +507,14 @@ impl InferenceContext {
                             }
                         }
 
-                        // Delta rule update: S += outer(K, (V - kv_mem) * beta)
-                        for (ki, &k_val) in k_h.iter().enumerate() {
+                        // Fused: delta rule update + output read (single pass over state)
+                        // S += outer(K, (V - kv_mem) * beta), then out[v] = sum_k(S[k,v] * Q[k])
+                        let out_h = &mut attn_result[vh * v_hd..(vh + 1) * v_hd];
+                        for (ki, (&k_val, &q_val)) in k_h.iter().zip(q_h.iter()).enumerate() {
                             let row_off = s_off + ki * v_hd;
                             for vi in 0..v_hd {
                                 let delta = (v_h[vi] - kv_mem[vi]) * beta_h;
                                 state[row_off + vi] += k_val * delta;
-                            }
-                        }
-
-                        // Read output: out[v] = sum_k(S[k,v] * Q[k])
-                        let out_h = &mut attn_result[vh * v_hd..(vh + 1) * v_hd];
-                        for (ki, &q_val) in q_h.iter().enumerate() {
-                            let row_off = s_off + ki * v_hd;
-                            for vi in 0..v_hd {
                                 out_h[vi] += state[row_off + vi] * q_val;
                             }
                         }
@@ -764,6 +760,9 @@ impl InferenceContext {
                     });
                     ranked.truncate(top_k);
 
+                    // Sort experts by index for sequential mmap access pattern
+                    ranked.sort_unstable();
+
                     // Renormalize top-k weights to sum to 1.0
                     let mut sel_logits: Vec<f32> = ranked.iter().map(|&i| probs[i]).collect();
                     let sel_sum: f32 = sel_logits.iter().sum();
@@ -795,8 +794,9 @@ impl InferenceContext {
                         }
                     }
 
-                    // Parallel expert computation: split across 2 threads
-                    let mid = ranked.len().div_ceil(2);
+                    // Parallel expert computation: split across physical cores
+                    let n_phys = num_cpus::get_physical().max(1);
+                    let mid = ranked.len().div_ceil(n_phys.min(ranked.len()));
                     let qtype = gate_t.qtype;
                     let (partial_a, partial_b) = std::thread::scope(|s| {
                         let ha = s.spawn(|| {
@@ -1063,19 +1063,31 @@ fn sample_argmax(logits: &[f32]) -> u32 {
     best_id
 }
 
-/// Prefetch mmap pages into OS page cache to reduce page faults on next read.
-/// Touches first byte of each 4KB page to trigger read-ahead.
+/// Prefetch mmap pages into OS page cache using madvise(MADV_WILLNEED).
+/// Non-blocking: tells the kernel to asynchronously read pages ahead.
 fn prefetch_mmap(data: &[u8]) {
-    const PAGE_SIZE: usize = 4096;
-    // Touch one byte per page to trigger OS read-ahead
-    let mut _sum: u8 = 0;
-    for offset in (0..data.len()).step_by(PAGE_SIZE) {
-        // SAFETY: just reading, the compiler can't optimize this out
-        // because _sum is used as a volatile-like accumulator
-        _sum = _sum.wrapping_add(data[offset]);
+    if data.is_empty() { return; }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: data is a valid memory-mapped region; MADV_WILLNEED is advisory only.
+        unsafe {
+            libc::madvise(
+                data.as_ptr() as *mut libc::c_void,
+                data.len(),
+                libc::MADV_WILLNEED,
+            );
+        }
     }
-    // Prevent the compiler from optimizing away the reads
-    std::hint::black_box(_sum);
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Fallback: touch one byte per page to trigger read-ahead
+        const PAGE_SIZE: usize = 4096;
+        let mut _sum: u8 = 0;
+        for offset in (0..data.len()).step_by(PAGE_SIZE) {
+            _sum = _sum.wrapping_add(data[offset]);
+        }
+        std::hint::black_box(_sum);
+    }
 }
 
 #[cfg(test)]
