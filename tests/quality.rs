@@ -110,27 +110,28 @@ fn validate_simd_correctness() {
     println!("SIMD validated: dot product error = {error}");
 }
 
-/// Verify TurboQuant compression ratio is correct
+/// Verify TurboQuant compression ratio is correct (V3, MSE-only, no QJL)
 #[test]
 fn validate_turboquant_compression() {
-    let tq = powerinfer::turboquant::TurboQuant::new(3, 128, 128, 42);
+    let tq = powerinfer::turboquant::TurboQuant::new_mse_only(3, 128, 42);
 
-    // 3-bit with dim=128 should compress to 64 bytes
+    // V3 (no QJL): 3-bit with dim=128 = 3*128 = 384 bits = 48 bytes
     assert_eq!(
         tq.compressed_bytes(),
-        64,
-        "3-bit 128-dim should be 64 bytes"
+        48,
+        "3-bit 128-dim V3 should be 48 bytes (no QJL overhead)"
     );
 
     // f32 version is 512 bytes
-    let ratio: f64 = 512.0 / 64.0;
+    let ratio: f64 = 512.0 / 48.0;
     assert!(
-        (ratio - 8.0).abs() < 0.01,
-        "Should be 8x compression, got {ratio}x"
+        (ratio - 10.67).abs() < 0.1,
+        "Should be ~10.7x compression, got {ratio}x"
     );
 
     println!(
-        "TurboQuant validated: {} bytes per vector (8x compression)",
-        tq.compressed_bytes()
+        "TurboQuant V3 validated: {} bytes per vector ({:.1}x compression)",
+        tq.compressed_bytes(),
+        ratio
     );
 }

@@ -12,12 +12,14 @@ use anyhow::anyhow;
 pub struct Tokenizer {
     /// Token ID → string piece
     vocab: Vec<String>,
-    /// Token ID → merge priority score
+    /// Token ID → merge priority score (kept for compatibility)
+    #[allow(dead_code)]
     scores: Vec<f32>,
     /// String piece → token ID
     token_to_id: HashMap<String, u32>,
-    /// BPE merge rules: "token1 token2" → merged_token_id
-    merges: HashMap<String, u32>,
+    /// BPE merge rules: "token1 token2" → (merged_token_id, priority_rank)
+    /// Lower rank = higher priority (applied first in BPE).
+    merges: HashMap<String, (u32, u32)>,
     /// Special token IDs
     bos_token_id: Option<u32>,
     eos_token_id: Option<u32>,
@@ -69,14 +71,21 @@ impl Tokenizer {
             token_to_id.insert(token.clone(), i as u32);
         }
 
-        // Load merges if present
+        // Load merges if present — each line is "token1 token2", index = priority rank
         let merges = if let Some(merges_val) = gguf.metadata("tokenizer.ggml.merges") {
             if let Some(merges_arr) = merges_val.as_array() {
                 let mut map = HashMap::new();
-                for (i, merge_val) in merges_arr.iter().enumerate() {
+                for (rank, merge_val) in merges_arr.iter().enumerate() {
                     if let Some(merge_str) = merge_val.as_str() {
                         // merge format: "token1 token2"
-                        map.insert(merge_str.to_string(), (vocab.len() + i) as u32);
+                        // The merged result is the concatenation "token1token2" looked up in vocab
+                        let parts: Vec<&str> = merge_str.splitn(2, ' ').collect();
+                        if parts.len() == 2 {
+                            let merged_piece = format!("{}{}", parts[0], parts[1]);
+                            if let Some(&merged_id) = token_to_id.get(&merged_piece) {
+                                map.insert(merge_str.to_string(), (merged_id, rank as u32));
+                            }
+                        }
                     }
                 }
                 map
@@ -183,9 +192,10 @@ impl Tokenizer {
                 break;
             }
 
-            // Find the best merge (lowest score = highest priority)
+            // Find the best merge (lowest rank = highest priority in BPE)
             let mut best_pos = None;
-            let mut best_score = f32::MAX;
+            let mut best_rank = u32::MAX;
+            let mut best_merged_id = 0u32;
 
             for i in 0..tokens.len() - 1 {
                 let pair = format!(
@@ -193,32 +203,18 @@ impl Tokenizer {
                     self.safe_token(tokens[i]),
                     self.safe_token(tokens[i + 1])
                 );
-                if let Some(&_merged_id) = self.merges.get(&pair) {
-                    // Use the score of the merged token if available
-                    let score = if (_merged_id as usize) < self.scores.len() {
-                        self.scores[_merged_id as usize]
-                    } else {
-                        f32::MAX
-                    };
-                    if score < best_score {
-                        best_score = score;
+                if let Some(&(merged_id, rank)) = self.merges.get(&pair) {
+                    if rank < best_rank {
+                        best_rank = rank;
                         best_pos = Some(i);
+                        best_merged_id = merged_id;
                     }
                 }
             }
 
             if let Some(pos) = best_pos {
-                let pair = format!(
-                    "{} {}",
-                    self.safe_token(tokens[pos]),
-                    self.safe_token(tokens[pos + 1])
-                );
-                if let Some(&merged_id) = self.merges.get(&pair) {
-                    tokens[pos] = merged_id;
-                    tokens.remove(pos + 1);
-                } else {
-                    break;
-                }
+                tokens[pos] = best_merged_id;
+                tokens.remove(pos + 1);
             } else {
                 break;
             }

@@ -13,6 +13,9 @@ categories = ["science", "ai", "hardware"]
 # GGUF parsing
 gguf-rs = "0.1"
 
+# Memory-mapped file access (essential for large model weight loading)
+memmap2 = "0.9"
+
 # Numeric types
 half = "2.4"
 

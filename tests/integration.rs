@@ -71,7 +71,7 @@ fn integration_profiler_to_hot_index() {
 fn integration_compressed_kv_attention() {
     let n_kv_heads = 2;
     let head_dim = 32;
-    let mut cache = CompressedKVCache::new(n_kv_heads, head_dim, 3, 3, 123);
+    let mut cache = CompressedKVCache::new(n_kv_heads, head_dim);
 
     // Append 50 tokens
     for t in 0..50 {
@@ -82,17 +82,13 @@ fn integration_compressed_kv_attention() {
             .map(|i| ((t * 100 + i) as f32 * 0.02).cos())
             .collect();
 
-        // Normalize
-        let k_norm: f32 = keys.iter().map(|v| v * v).sum::<f32>().sqrt();
-        let v_norm: f32 = vals.iter().map(|v| v * v).sum::<f32>().sqrt();
-        let keys: Vec<f32> = keys.iter().map(|v| v / k_norm).collect();
-        let vals: Vec<f32> = vals.iter().map(|v| v / v_norm).collect();
-
         cache.append(&keys, &vals);
     }
 
     assert_eq!(cache.seq_len(), 50);
-    assert!(cache.compression_ratio() > 3.0);
+    // TurboQuant 3-bit keys + f16 values: compression > 2x
+    let ratio = cache.compression_ratio();
+    assert!(ratio > 2.0, "Expected > 2.0x compression with TurboQuant, got {ratio}");
 
     // Compute attention scores
     let q: Vec<f32> = (0..head_dim).map(|i| (i as f32 * 0.1).sin()).collect();

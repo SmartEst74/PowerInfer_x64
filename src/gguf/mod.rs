@@ -26,7 +26,7 @@ impl GgufFile {
             .as_ref()
             .to_str()
             .ok_or_else(|| anyhow!("Invalid path"))?;
-        let mut container = gguf_rs::get_gguf_container(path_str)?;
+        let mut container = gguf_rs::get_gguf_container_array_size(path_str, u64::MAX)?;
         let model = container.decode()?;
         Ok(Self {
             model,
@@ -112,14 +112,38 @@ impl GgufFile {
         self.get_config("feed_forward_length")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
+            .or_else(|| {
+                // MoE models may not have feed_forward_length — use expert intermediate size
+                self.moe_config().map(|m| m.expert_intermediate_size)
+            })
             .ok_or_else(|| anyhow!("Feed forward length not found"))
     }
 
-    /// Get RoPE dimension (partial rotary embedding dimension)
-    pub fn rope_dim(&self) -> Option<usize> {
-        self.get_config("rope.dimension")
+    /// Get attention key (query) head dimension
+    pub fn attention_key_length(&self) -> Option<usize> {
+        self.get_config("attention.key_length")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
+    }
+
+    /// Get attention value head dimension
+    pub fn attention_value_length(&self) -> Option<usize> {
+        self.get_config("attention.value_length")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+    }
+
+    /// Get RoPE rotation dimension count
+    pub fn rope_dim(&self) -> Option<usize> {
+        // qwen35moe uses rope.dimension_count; older models use rope.dimension
+        self.get_config("rope.dimension_count")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .or_else(|| {
+                self.get_config("rope.dimension")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+            })
     }
 
     /// Get MoE configuration (if present)
@@ -128,9 +152,25 @@ impl GgufFile {
         let expert_used_count = self
             .get_config("expert_used_count")
             .and_then(|v| v.as_u64())? as usize;
+
+        // expert_feed_forward_length may not be in metadata — derive from tensor shape
         let expert_intermediate_size = self
             .get_config("expert_feed_forward_length")
-            .and_then(|v| v.as_u64())? as usize;
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .or_else(|| {
+                // Derive from ffn_gate_exps.weight shape: [n_embd, expert_ffn_dim, n_experts, 1]
+                self.tensors()
+                    .iter()
+                    .find(|t| t.name.contains("ffn_gate_exps.weight"))
+                    .and_then(|t| {
+                        if t.shape.len() >= 2 {
+                            Some(t.shape[1] as usize)
+                        } else {
+                            None
+                        }
+                    })
+            })?;
 
         Some(MoeConfig {
             expert_count,
@@ -139,31 +179,49 @@ impl GgufFile {
         })
     }
 
-    /// Get Qwen3-specific: full attention interval (for hybrid DeltaNet+Full)
+    /// SSM (Mamba-2) configuration for hybrid architectures
+    pub fn ssm_config(&self) -> Option<SsmConfig> {
+        let inner_size = self.get_config("ssm.inner_size").and_then(|v| v.as_u64())? as usize;
+        let state_size = self.get_config("ssm.state_size").and_then(|v| v.as_u64())? as usize;
+        let conv_kernel = self.get_config("ssm.conv_kernel").and_then(|v| v.as_u64()).unwrap_or(4) as usize;
+        let time_step_rank = self.get_config("ssm.time_step_rank").and_then(|v| v.as_u64()).unwrap_or(32) as usize;
+        let group_count = self.get_config("ssm.group_count").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+        Some(SsmConfig { inner_size, state_size, conv_kernel, time_step_rank, group_count })
+    }
+
+    /// Get full attention interval (if present; controls which layers use full vs linear attention)
     pub fn qwen_full_attention_interval(&self) -> Option<usize> {
-        self.kv()
-            .get("qwen3.full_attention_interval")
+        // Try architecture-specific key first
+        self.get_config("full_attention_interval")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
     }
 
     /// Build model configuration structure
     pub fn model_config(&self) -> Result<ModelConfig> {
+        let n_heads = self.attention_head_count()?;
+        let n_embd = self.embedding_length()?;
+        // Prefer explicit key_length (e.g. qwen35moe), else derive from embedding/heads
+        let head_dim = self.attention_key_length()
+            .unwrap_or_else(|| n_embd / n_heads);
         Ok(ModelConfig {
             arch: self.architecture()?.to_string(),
             name: self.name().map(String::from),
             context_length: self.context_length()?,
-            embedding_length: self.embedding_length()?,
+            embedding_length: n_embd,
             block_count: self.block_count()?,
             attention: LayerConfig {
-                head_count: self.attention_head_count()?,
+                head_count: n_heads,
                 head_count_kv: self.attention_head_count_kv(),
-                head_dim: self.embedding_length()? / self.attention_head_count()?,
+                head_dim,
+                key_length: self.attention_key_length(),
+                value_length: self.attention_value_length(),
                 rope_dim: self.rope_dim(),
                 full_attention_interval: self.qwen_full_attention_interval(),
             },
             feed_forward_length: self.feed_forward_length()?,
             moe: self.moe_config(),
+            ssm: self.ssm_config(),
             quantization: self.quantization_type()?,
             rms_epsilon: self
                 .get_config("attention.layer_norm_rms_epsilon")
@@ -212,6 +270,21 @@ pub struct MoeConfig {
     pub expert_count: usize,
     pub expert_used_count: usize,
     pub expert_intermediate_size: usize,
+}
+
+/// SSM (Mamba-2 / Gated DeltaNet) configuration for hybrid architectures
+#[derive(Debug, Clone, Copy)]
+pub struct SsmConfig {
+    /// Inner state dimension (d_inner)
+    pub inner_size: usize,
+    /// State size for selective scan (d_state)
+    pub state_size: usize,
+    /// Conv1D kernel size
+    pub conv_kernel: usize,
+    /// Time step projection rank
+    pub time_step_rank: usize,
+    /// Number of scan groups
+    pub group_count: usize,
 }
 
 #[cfg(test)]

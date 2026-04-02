@@ -604,8 +604,9 @@ pub fn matvec_f32(y: &mut [f32], x: &[f32], w: &[f32], n_out: usize, n_in: usize
     }
 }
 
-/// Quantized matrix-vector multiplication: y = x @ w
-/// where x is [n_in] (f32), w_data is quantized [n_out, n_in], y is [n_out] (f32)
+/// Quantized matrix-vector multiplication: y = x @ w (row-major layout)
+/// where x is [n_in] (f32), w_data is quantized [n_out, n_in] row-major, y is [n_out] (f32)
+#[allow(dead_code)]
 pub fn matvec_quantized(
     y: &mut [f32],
     x: &[f32],
@@ -631,6 +632,337 @@ pub fn matvec_quantized(
         *yi = sum;
     }
 
+    Ok(())
+}
+
+/// Compute y[j] = x · W[:,j] for all j, where W is [ne0=n_in, ne1=n_out] stored
+/// in GGML column-major Q8_0 format.
+///
+/// This is the correct operation for GGML `ggml_mul_mat(W, x)` → y.
+/// No full f32 materialization needed — processes one Q8_0 block at a time.
+///
+/// Uses SSE4.1 SIMD when available (4× throughput on the inner dot product).
+/// Parallelized across CPU cores using std::thread::scope for large matvecs.
+///
+/// Precondition: n_in must be divisible by 32 (Q8_0 block size).
+pub fn matvec_col_major_q8_0(y: &mut [f32], x: &[f32], raw: &[u8], n_in: usize, n_out: usize) {
+    debug_assert_eq!(x.len(), n_in);
+    debug_assert_eq!(y.len(), n_out);
+    debug_assert_eq!(n_in % 32, 0, "n_in must be divisible by 32 for Q8_0");
+
+    let blocks_per_col = n_in / 32;
+    let bytes_per_col = blocks_per_col * 34; // 2 scale bytes + 32 int8 bytes per block
+
+    // Parallelize large matvecs across available CPU cores.
+    // Threshold: parallelize if output dimension is large enough to amortize overhead.
+    let n_threads = num_cpus::get().max(1);
+    if n_threads > 1 && n_out >= 4096 {
+        matvec_q8_0_parallel(y, x, raw, n_in, n_out, blocks_per_col, bytes_per_col, n_threads);
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("sse4.1") {
+            // SAFETY: SSE4.1 detected; SIMD loads are unaligned (safe on x86).
+            unsafe { matvec_q8_0_sse(y, x, raw, n_in, n_out, blocks_per_col, bytes_per_col) };
+            return;
+        }
+    }
+
+    // Scalar fallback
+    matvec_q8_0_scalar(y, x, raw, n_out, blocks_per_col, bytes_per_col);
+}
+
+/// Parallel Q8_0 matvec: splits output rows across threads.
+#[allow(clippy::too_many_arguments)]
+fn matvec_q8_0_parallel(
+    y: &mut [f32],
+    x: &[f32],
+    raw: &[u8],
+    _n_in: usize,
+    n_out: usize,
+    blocks_per_col: usize,
+    bytes_per_col: usize,
+    n_threads: usize,
+) {
+    let chunk_size = n_out.div_ceil(n_threads);
+
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(n_threads);
+        let mut y_rest = &mut *y;
+
+        for chunk_idx in 0..n_threads {
+            let start = chunk_idx * chunk_size;
+            if start >= n_out {
+                break;
+            }
+            let end = (start + chunk_size).min(n_out);
+            let count = end - start;
+
+            let (y_chunk, rest) = y_rest.split_at_mut(count);
+            y_rest = rest;
+
+            // Each thread gets its slice of y and computes its output rows
+            handles.push(s.spawn(move || {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if is_x86_feature_detected!("sse4.1") {
+                        // SAFETY: SSE4.1 detected; each thread writes to its own y_chunk
+                        unsafe {
+                            matvec_q8_0_sse_range(
+                                y_chunk, x, raw, start, count,
+                                blocks_per_col, bytes_per_col,
+                            );
+                        }
+                        return;
+                    }
+                }
+                // Scalar fallback for this chunk
+                for (local_j, yj) in y_chunk.iter_mut().enumerate() {
+                    let j = start + local_j;
+                    let col_off = j * bytes_per_col;
+                    let mut sum = 0.0f32;
+                    for b in 0..blocks_per_col {
+                        let blk_off = col_off + b * 34;
+                        let scale =
+                            half::f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+                        let x_base = b * 32;
+                        let mut block_dot = 0.0f32;
+                        for i in 0..32 {
+                            block_dot += (raw[blk_off + 2 + i] as i8) as f32 * x[x_base + i];
+                        }
+                        sum += block_dot * scale;
+                    }
+                    *yj = sum;
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("matvec thread panicked");
+        }
+    });
+}
+
+/// SSE4.1-accelerated Q8_0 column-major matvec for a range of output rows.
+///
+/// Uses `_mm_cvtepi8_epi32` + `_mm_cvtepi32_ps` for fast int8→f32 conversion
+/// instead of scalar loads (3 instructions vs ~8).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn matvec_q8_0_sse_range(
+    y_chunk: &mut [f32],
+    x: &[f32],
+    raw: &[u8],
+    start_row: usize,
+    count: usize,
+    blocks_per_col: usize,
+    bytes_per_col: usize,
+) {
+    use std::arch::x86_64::*;
+
+    for (local_j, yj) in y_chunk.iter_mut().enumerate().take(count) {
+        let j = start_row + local_j;
+        let col_off = j * bytes_per_col;
+        let mut acc = _mm_setzero_ps();
+
+        for b in 0..blocks_per_col {
+            let blk_off = col_off + b * 34;
+            let scale =
+                half::f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+            let scale_v = _mm_set1_ps(scale);
+            let quants_ptr = raw.as_ptr().add(blk_off + 2);
+            let x_base = b * 32;
+
+            let mut blk_acc = _mm_setzero_ps();
+
+            // Process 32 values: 8 iterations × 4 values each
+            // SSE4.1: load 4 int8 → sign-extend to int32 → convert to f32
+            let mut k = 0;
+            while k < 32 {
+                let bytes = _mm_cvtsi32_si128((quants_ptr.add(k) as *const i32).read_unaligned());
+                let qi = _mm_cvtepi32_ps(_mm_cvtepi8_epi32(bytes));
+                let xi = _mm_loadu_ps(x.as_ptr().add(x_base + k));
+                blk_acc = _mm_add_ps(blk_acc, _mm_mul_ps(qi, xi));
+                k += 4;
+            }
+
+            acc = _mm_add_ps(acc, _mm_mul_ps(blk_acc, scale_v));
+        }
+
+        let shuf = _mm_movehdup_ps(acc);
+        let sums = _mm_add_ps(acc, shuf);
+        let shuf2 = _mm_movehl_ps(sums, sums);
+        let final_sum = _mm_add_ss(sums, shuf2);
+        *yj = _mm_cvtss_f32(final_sum);
+    }
+}
+
+/// Scalar Q8_0 matvec fallback
+fn matvec_q8_0_scalar(
+    y: &mut [f32],
+    x: &[f32],
+    raw: &[u8],
+    n_out: usize,
+    blocks_per_col: usize,
+    bytes_per_col: usize,
+) {
+    for (j, yj) in y.iter_mut().enumerate().take(n_out) {
+        let col_off = j * bytes_per_col;
+        let mut sum = 0.0f32;
+        for b in 0..blocks_per_col {
+            let blk_off = col_off + b * 34;
+            let scale =
+                half::f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+            let x_base = b * 32;
+            let mut block_dot = 0.0f32;
+            for i in 0..32 {
+                block_dot += (raw[blk_off + 2 + i] as i8) as f32 * x[x_base + i];
+            }
+            sum += block_dot * scale;
+        }
+        *yj = sum;
+    }
+}
+
+/// SSE4.1-accelerated Q8_0 column-major matvec (single-threaded path).
+///
+/// Processes 4 int8 values at a time using SIMD.
+/// Only used for small matvecs (n_out < threshold) that skip threading.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn matvec_q8_0_sse(
+    y: &mut [f32],
+    x: &[f32],
+    raw: &[u8],
+    _n_in: usize,
+    n_out: usize,
+    blocks_per_col: usize,
+    bytes_per_col: usize,
+) {
+    use std::arch::x86_64::*;
+
+    for (j, yj) in y.iter_mut().enumerate().take(n_out) {
+        let col_off = j * bytes_per_col;
+        let mut acc = _mm_setzero_ps();
+
+        for b in 0..blocks_per_col {
+            let blk_off = col_off + b * 34;
+            let scale =
+                half::f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+            let scale_v = _mm_set1_ps(scale);
+            let quants_ptr = raw.as_ptr().add(blk_off + 2);
+            let x_base = b * 32;
+
+            let mut blk_acc = _mm_setzero_ps();
+
+            // SSE4.1: load 4 int8 → sign-extend to int32 → convert to f32
+            let mut k = 0;
+            while k < 32 {
+                let bytes = _mm_cvtsi32_si128((quants_ptr.add(k) as *const i32).read_unaligned());
+                let qi = _mm_cvtepi32_ps(_mm_cvtepi8_epi32(bytes));
+                let xi = _mm_loadu_ps(x.as_ptr().add(x_base + k));
+                blk_acc = _mm_add_ps(blk_acc, _mm_mul_ps(qi, xi));
+                k += 4;
+            }
+
+            acc = _mm_add_ps(acc, _mm_mul_ps(blk_acc, scale_v));
+        }
+
+        let shuf = _mm_movehdup_ps(acc);
+        let sums = _mm_add_ps(acc, shuf);
+        let shuf2 = _mm_movehl_ps(sums, sums);
+        let final_sum = _mm_add_ss(sums, shuf2);
+        *yj = _mm_cvtss_f32(final_sum);
+    }
+}
+
+/// Compute y[j] = x · W[:,j] for all j, where W is [ne0=n_in, ne1=n_out] stored
+/// in GGML column-major F32 format.
+pub fn matvec_col_major_f32(y: &mut [f32], x: &[f32], raw: &[u8], n_in: usize, n_out: usize) {
+    debug_assert_eq!(x.len(), n_in);
+    debug_assert_eq!(y.len(), n_out);
+    for (j, yj) in y.iter_mut().enumerate() {
+        let col_off = j * n_in;
+        let mut sum = 0.0f32;
+        for (i, &xi) in x.iter().enumerate() {
+            let w_bytes: [u8; 4] = raw[(col_off + i) * 4..(col_off + i) * 4 + 4]
+                .try_into()
+                .unwrap_or([0u8; 4]);
+            sum += f32::from_le_bytes(w_bytes) * xi;
+        }
+        *yj = sum;
+    }
+}
+
+/// Dispatch quantized column-major matmul.
+/// Handles Q8_0 efficiently; falls back to full dequant for other types.
+pub fn matvec_col_major(
+    y: &mut [f32],
+    x: &[f32],
+    raw: &[u8],
+    qtype: QuantizationType,
+    n_in: usize,
+    n_out: usize,
+) -> Result<()> {
+    match qtype {
+        QuantizationType::Q8_0 => {
+            if n_in.is_multiple_of(32) {
+                matvec_col_major_q8_0(y, x, raw, n_in, n_out);
+                return Ok(());
+            }
+        }
+        QuantizationType::F32 => {
+            matvec_col_major_f32(y, x, raw, n_in, n_out);
+            return Ok(());
+        }
+        _ => {}
+    }
+    // Fallback: dequantize all then multiply (may use lots of RAM for large tensors)
+    let w_f32 = dequantize(raw, qtype, 1, n_in * n_out)?;
+    for j in 0..n_out {
+        let mut sum = 0.0f32;
+        for i in 0..n_in {
+            sum += x[i] * w_f32[j * n_in + i];
+        }
+        y[j] = sum;
+    }
+    Ok(())
+}
+
+/// SwiGLU FFN directly on quantized weight bytes — avoids materializing f32 matrices.
+///
+/// ffn(x) = down_w @ (SiLU(gate_w @ x) * (up_w @ x))
+///
+/// All three weight matrices are in GGML column-major format:
+/// - gate_raw/up_raw: [ne0=n_embd, ne1=n_ff], maps n_embd → n_ff
+/// - down_raw: [ne0=n_ff, ne1=n_embd], maps n_ff → n_embd
+#[allow(clippy::too_many_arguments)]
+pub fn ffn_swiglu_q(
+    out: &mut [f32],
+    x: &[f32],
+    gate_raw: &[u8],
+    up_raw: &[u8],
+    down_raw: &[u8],
+    qtype: QuantizationType,
+    n_embd: usize,
+    n_ff: usize,
+) -> Result<()> {
+    let mut gate = vec![0.0f32; n_ff];
+    let mut up = vec![0.0f32; n_ff];
+
+    matvec_col_major(&mut gate, x, gate_raw, qtype, n_embd, n_ff)?;
+    matvec_col_major(&mut up, x, up_raw, qtype, n_embd, n_ff)?;
+
+    // SiLU(gate) * up
+    for i in 0..n_ff {
+        let sig = 1.0 / (1.0 + (-gate[i]).exp());
+        gate[i] = gate[i] * sig * up[i];
+    }
+
+    // down: n_ff → n_embd
+    matvec_col_major(out, &gate, down_raw, qtype, n_ff, n_embd)?;
     Ok(())
 }
 

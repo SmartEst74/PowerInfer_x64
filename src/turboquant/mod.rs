@@ -1,14 +1,23 @@
-//! TurboQuant: Extreme KV cache compression for LLM inference
+//! TurboQuant: Vector quantization for KV cache compression in LLM inference
 //!
 //! Implements Google Research's TurboQuant algorithm (ICLR 2026) for compressing
-//! key-value caches to 2-4 bits per coordinate with zero accuracy loss.
+//! key-value caches to 2-4 bits per coordinate while preserving attention quality.
 //!
 //! Paper: "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate"
 //! arXiv:2504.19874
 //!
+//! Note: TurboQuant compresses the KV cache, NOT model weights. Model weight
+//! quantization uses GGUF's own formats (Q4_K_M, Q8_0, etc.).
+//!
 //! Two-stage algorithm:
 //! - Stage 1 (PolarQuant): Random rotation + Lloyd-Max scalar quantization
 //! - Stage 2 (QJL): 1-bit sign correction for unbiased inner products
+//!   The paper mathematically proves QJL produces unbiased dot product estimates.
+//!   Per-vector reconstruction error is 23-44% MSE, but inner products are accurate.
+//!
+//! QJL is enabled by default. Set `qjl_bits = 0` for MSE-only mode (no QJL).
+//!
+//! Reference: https://github.com/tonbistudio/turboquant-pytorch
 
 #![allow(clippy::needless_range_loop)] // Index notation is clearer for matrix ops
 
@@ -32,6 +41,14 @@ const LLOYD_MAX_CENTROIDS: [&[f32]; 4] = [
 ];
 
 /// TurboQuant compressor/decompressor for vectors of a fixed dimension.
+///
+/// Supports two modes:
+/// - V2 (with QJL): Random rotation + Lloyd-Max + QJL residual correction.
+///   Produces unbiased inner product estimates (paper-proven).
+/// - V3 (MSE-only): Random rotation + Lloyd-Max only, no QJL.
+///   Lower variance but biased inner products.
+///
+/// Set `qjl_bits > 0` to enable QJL (V2), or `qjl_bits = 0` for MSE-only (V3).
 pub struct TurboQuant {
     /// Random orthogonal rotation matrix [dim x dim], row-major
     rotation: Vec<f32>,
@@ -41,18 +58,20 @@ pub struct TurboQuant {
     bits: usize,
     /// Lloyd-Max centroids for the selected bit-width
     centroids: Vec<f32>,
-    /// QJL projection matrix [qjl_bits x dim], row-major, random Gaussian
+    /// QJL projection matrix [qjl_bits x dim], row-major, random Gaussian.
+    /// Empty if qjl_bits == 0 (MSE-only mode).
     qjl_matrix: Vec<f32>,
-    /// Number of QJL projection bits (1 bit per projection)
+    /// Number of QJL projection bits (0 = MSE-only, >0 = QJL enabled)
     qjl_bits: usize,
 }
 
 impl TurboQuant {
-    /// Create a new TurboQuant compressor.
+    /// Create a new TurboQuant compressor with QJL enabled.
     ///
     /// - `bits`: quantization bits per coordinate (2, 3, or 4)
     /// - `dim`: vector dimensionality (typically head_dim, e.g. 128)
-    /// - `qjl_bits`: number of QJL residual correction bits (typically = dim)
+    /// - `qjl_bits`: number of QJL residual correction bits (typically = dim).
+    ///   Set to 0 for MSE-only mode (no QJL).
     /// - `seed`: RNG seed for reproducibility
     pub fn new(bits: usize, dim: usize, qjl_bits: usize, seed: u64) -> Self {
         assert!((2..=4).contains(&bits), "bits must be 2, 3, or 4");
@@ -63,8 +82,12 @@ impl TurboQuant {
         // Generate random orthogonal matrix via QR decomposition
         let rotation = generate_orthogonal_matrix(dim, seed);
 
-        // Generate QJL projection matrix (random Gaussian)
-        let qjl_matrix = generate_gaussian_matrix(qjl_bits, dim, seed ^ 0xDEAD_BEEF);
+        // Generate QJL projection matrix (random Gaussian) if QJL is enabled
+        let qjl_matrix = if qjl_bits > 0 {
+            generate_gaussian_matrix(qjl_bits, dim, seed ^ 0xDEAD_BEEF)
+        } else {
+            Vec::new()
+        };
 
         Self {
             rotation,
@@ -76,19 +99,32 @@ impl TurboQuant {
         }
     }
 
+    /// Create MSE-only compressor (no QJL, V3 mode).
+    ///
+    /// Simpler and lower variance, but inner product estimates are biased.
+    /// May be preferred when the quantization error is small (4+ bits).
+    pub fn new_mse_only(bits: usize, dim: usize, seed: u64) -> Self {
+        Self::new(bits, dim, 0, seed)
+    }
+
     /// Number of bytes needed to store a compressed vector
     pub fn compressed_bytes(&self) -> usize {
         // Quantized indices: bits * dim bits, packed
         let index_bytes = (self.bits * self.dim).div_ceil(8);
-        // QJL sign bits: qjl_bits bits, packed
+        // QJL sign bits: qjl_bits bits, packed (0 if QJL disabled)
         let qjl_bytes = self.qjl_bits.div_ceil(8);
         index_bytes + qjl_bytes
+    }
+
+    /// Whether QJL is enabled
+    pub fn has_qjl(&self) -> bool {
+        self.qjl_bits > 0
     }
 
     /// Quantize a single vector to packed bytes.
     ///
     /// Input: `x` [dim] — the vector to compress (assumed unit-norm)
-    /// Output: packed bytes containing quantized indices + QJL sign bits
+    /// Output: packed bytes containing quantized indices (+ QJL sign bits if enabled)
     pub fn quantize_vector(&self, x: &[f32]) -> Vec<u8> {
         debug_assert_eq!(x.len(), self.dim);
 
@@ -123,6 +159,11 @@ impl TurboQuant {
                 }
             }
             indices[i] = best_idx;
+        }
+
+        if self.qjl_bits == 0 {
+            // MSE-only mode: just pack indices
+            return pack_indices(&indices, self.bits);
         }
 
         // Stage 2: QJL residual correction
@@ -173,11 +214,37 @@ impl TurboQuant {
         result
     }
 
-    /// Compute attention score between a full-precision query and a compressed key
-    /// using the asymmetric TurboQuant estimator.
+    /// Compute attention score between a full-precision query and a compressed key.
     ///
-    /// This is the core operation — accurate attention scores from compressed keys.
-    pub fn asymmetric_dot(&self, q: &[f32], packed_key: &[u8]) -> f32 {
+    /// When QJL is enabled, uses the asymmetric estimator from the paper which
+    /// produces unbiased inner product estimates by correcting for the quantization
+    /// residual using the QJL sign bits.
+    ///
+    /// When QJL is disabled (MSE-only), dequantizes the key and computes the
+    /// dot product directly (lower variance but biased).
+    pub fn dot(&self, q: &[f32], packed_key: &[u8]) -> f32 {
+        debug_assert_eq!(q.len(), self.dim);
+
+        if self.qjl_bits == 0 {
+            // MSE-only mode: dequantize and dot
+            let key_deq = self.dequantize_vector(packed_key);
+            let mut dot = 0.0f32;
+            for i in 0..self.dim {
+                dot += q[i] * key_deq[i];
+            }
+            return dot;
+        }
+
+        // QJL mode: asymmetric estimator (unbiased)
+        self.asymmetric_dot(q, packed_key)
+    }
+
+    /// Compute attention score using the QJL asymmetric estimator.
+    ///
+    /// This is the core operation from the paper — produces unbiased inner product
+    /// estimates by combining the MSE-quantized dot product with a QJL correction
+    /// term that accounts for the quantization residual.
+    fn asymmetric_dot(&self, q: &[f32], packed_key: &[u8]) -> f32 {
         debug_assert_eq!(q.len(), self.dim);
 
         let indices = unpack_indices(packed_key, self.bits, self.dim);
@@ -197,8 +264,6 @@ impl TurboQuant {
         }
 
         // Stage 1: <q_rot, k_quantized> in scaled space
-        // Both q and k are unit vectors; after rotation they have variance 1/d.
-        // The centroids are in N(0,1) space, so we need to scale the dot product.
         let mut mse_dot = 0.0f32;
         for i in 0..self.dim {
             let k_deq = self.centroids[indices[i] as usize];
@@ -208,8 +273,6 @@ impl TurboQuant {
         // Stage 2: QJL correction
         // Estimate residual norm from quantization distortion
         let distortion = self.expected_distortion();
-        // In scaled space, variance is ~1, so residual variance ≈ distortion
-        // Residual norm ≈ sqrt(distortion * dim) * inv_scale ≈ sqrt(distortion / dim)
         let residual_norm = (distortion * inv_scale).sqrt();
 
         // Project query through QJL matrix
@@ -250,127 +313,132 @@ impl TurboQuant {
     }
 }
 
-// --- Compressed KV Cache ---
+// --- Compressed KV Cache (TurboQuant 3-bit + QJL) ---
 
-/// Compressed KV cache layer using TurboQuant.
+/// TurboQuant-compressed KV cache for efficient attention.
 ///
-/// Stores keys and values in compressed format, enabling much longer contexts
-/// within the same memory budget.
+/// Stores keys using TurboQuant (3-bit Lloyd-Max + 1-bit QJL = 4 bits total per coordinate),
+/// values as f16. This provides:
+/// - ~5× compression for keys with quality-neutral attention (paper: 0.997 needle-in-haystack)
+/// - ~2× compression for values via f16
+/// - Unbiased inner product estimates via QJL residual correction
+///
+/// The paper (arXiv:2504.19874) proves that at 3.5 bits/channel, TurboQuant preserves
+/// attention quality identically to full precision.
+///
+/// Keys use TurboQuant because attention scores are inner products (dot products),
+/// which TurboQuant's QJL corrects to be unbiased. Values use f16 because they are
+/// weighted-summed (not inner-producted), where f16's ~0.01 absolute error is negligible.
 pub struct CompressedKVCache {
-    /// Compressed key vectors [seq_len * packed_bytes_per_key]
-    keys_packed: Vec<u8>,
-    /// Compressed value vectors [seq_len * packed_bytes_per_val]
-    vals_packed: Vec<u8>,
-    /// Bytes per compressed key vector
-    key_packed_bytes: usize,
-    /// Bytes per compressed value vector
-    val_packed_bytes: usize,
-    /// Number of head dimensions
+    /// TurboQuant compressor for key vectors (one per KV head)
+    key_quantizers: Vec<TurboQuant>,
+    /// Compressed key vectors: [seq_len][n_kv_heads] = packed bytes per head
+    compressed_keys: Vec<Vec<Vec<u8>>>,
+    /// Key L2 norms (TurboQuant requires unit-norm input): [seq_len][n_kv_heads]
+    key_norms: Vec<Vec<f32>>,
+    /// Values as f16: [seq_len * n_kv_heads * head_dim]
+    values: Vec<half::f16>,
+    /// Head dimension (kv_head_dim, e.g. 128)
     head_dim: usize,
     /// Number of KV heads
     n_kv_heads: usize,
     /// Number of tokens stored
     seq_len: usize,
-    /// Key compressor
-    key_quant: TurboQuant,
-    /// Value compressor (may use higher bits for accuracy)
-    val_quant: TurboQuant,
 }
 
 impl CompressedKVCache {
-    /// Create a new compressed KV cache.
+    /// Create a new TurboQuant-compressed KV cache.
     ///
-    /// - `n_kv_heads`: number of key/value attention heads
-    /// - `head_dim`: dimension per head
-    /// - `key_bits`: quantization bits for keys (2-4)
-    /// - `val_bits`: quantization bits for values (2-4)
-    /// - `seed`: RNG seed
-    pub fn new(
-        n_kv_heads: usize,
-        head_dim: usize,
-        key_bits: usize,
-        val_bits: usize,
-        seed: u64,
-    ) -> Self {
-        let key_quant = TurboQuant::new(key_bits, head_dim, head_dim, seed);
-        let val_quant = TurboQuant::new(val_bits, head_dim, head_dim, seed ^ 0xCAFE);
-
-        let key_packed_bytes = key_quant.compressed_bytes();
-        let val_packed_bytes = val_quant.compressed_bytes();
+    /// - `n_kv_heads`: number of KV attention heads
+    /// - `head_dim`: dimension per head (kv_head_dim, typically 128)
+    pub fn new(n_kv_heads: usize, head_dim: usize) -> Self {
+        // Create one TurboQuant compressor per KV head.
+        // 3-bit quantization + head_dim QJL bits = ~4 bits/coordinate total.
+        // Each head gets a different seed for independent random rotations.
+        let key_quantizers: Vec<TurboQuant> = (0..n_kv_heads)
+            .map(|h| TurboQuant::new(3, head_dim, head_dim, 0xCAFE_BABE + h as u64))
+            .collect();
 
         Self {
-            keys_packed: Vec::new(),
-            vals_packed: Vec::new(),
-            key_packed_bytes,
-            val_packed_bytes,
+            key_quantizers,
+            compressed_keys: Vec::new(),
+            key_norms: Vec::new(),
+            values: Vec::new(),
             head_dim,
             n_kv_heads,
             seq_len: 0,
-            key_quant,
-            val_quant,
         }
     }
 
     /// Append new key/value vectors for one token position.
     ///
-    /// - `keys`: [n_kv_heads * head_dim] key vectors
-    /// - `values`: [n_kv_heads * head_dim] value vectors
+    /// Keys are L2-normalized then compressed via TurboQuant (3-bit + QJL).
+    /// The norm is stored separately to reconstruct accurate inner products:
+    ///   dot(q, k) ≈ ||k|| × TurboQuant.dot(q, compress(k/||k||))
+    /// Values are stored as f16.
     pub fn append(&mut self, keys: &[f32], values: &[f32]) {
         debug_assert_eq!(keys.len(), self.n_kv_heads * self.head_dim);
         debug_assert_eq!(values.len(), self.n_kv_heads * self.head_dim);
 
+        // Compress each KV head's key vector independently
+        let mut token_keys = Vec::with_capacity(self.n_kv_heads);
+        let mut token_norms = Vec::with_capacity(self.n_kv_heads);
         for h in 0..self.n_kv_heads {
-            let h_offset = h * self.head_dim;
-            let key_head = &keys[h_offset..h_offset + self.head_dim];
-            let val_head = &values[h_offset..h_offset + self.head_dim];
+            let offset = h * self.head_dim;
+            let key_head = &keys[offset..offset + self.head_dim];
 
-            let packed_key = self.key_quant.quantize_vector(key_head);
-            let packed_val = self.val_quant.quantize_vector(val_head);
+            // L2-normalize before TurboQuant (required for correct codebook matching)
+            let norm: f32 = key_head.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let inv_norm = if norm > 1e-12 { 1.0 / norm } else { 0.0 };
+            let normalized: Vec<f32> = key_head.iter().map(|&x| x * inv_norm).collect();
 
-            self.keys_packed.extend_from_slice(&packed_key);
-            self.vals_packed.extend_from_slice(&packed_val);
+            let packed = self.key_quantizers[h].quantize_vector(&normalized);
+            token_keys.push(packed);
+            token_norms.push(norm);
         }
+        self.compressed_keys.push(token_keys);
+        self.key_norms.push(token_norms);
 
+        // Store values as f16
+        self.values
+            .extend(values.iter().map(|&v| half::f16::from_f32(v)));
         self.seq_len += 1;
     }
 
-    /// Compute attention scores for one head using compressed keys.
+    /// Compute attention scores for one head using TurboQuant-compressed keys.
     ///
-    /// Returns attention weights [seq_len] for the given query.
+    /// Uses the asymmetric QJL estimator for unbiased inner products.
+    /// Rescales by the stored key norm: score = ||k|| × dot(q, k_hat) / sqrt(d)
+    /// Returns attention weights [seq_len] for the given query, scaled by 1/sqrt(d).
     pub fn attention_scores(&self, q_head: &[f32], kv_head_idx: usize) -> Vec<f32> {
+        let scale = 1.0 / (self.head_dim as f32).sqrt();
+        let tq = &self.key_quantizers[kv_head_idx];
         let mut scores = vec![0.0f32; self.seq_len];
 
         for t in 0..self.seq_len {
-            let key_offset = (t * self.n_kv_heads + kv_head_idx) * self.key_packed_bytes;
-            let packed_key = &self.keys_packed[key_offset..key_offset + self.key_packed_bytes];
-            scores[t] = self.key_quant.asymmetric_dot(q_head, packed_key);
-        }
-
-        // Scale by 1/sqrt(d)
-        let scale = 1.0 / (self.head_dim as f32).sqrt();
-        for s in scores.iter_mut() {
-            *s *= scale;
+            let packed_key = &self.compressed_keys[t][kv_head_idx];
+            let key_norm = self.key_norms[t][kv_head_idx];
+            // dot(q, k) ≈ ||k|| × TurboQuant.dot(q, k/||k||)
+            scores[t] = key_norm * tq.dot(q_head, packed_key) * scale;
         }
 
         scores
     }
 
-    /// Weighted sum of compressed value vectors.
+    /// Weighted sum of f16 value vectors.
     ///
     /// - `weights`: attention weights [seq_len] (already softmaxed)
     /// - `kv_head_idx`: which KV head to read from
     ///
-    /// Returns the weighted value vector [head_dim].
+    /// Returns the weighted value vector [head_dim] in f32.
     pub fn weighted_value_sum(&self, weights: &[f32], kv_head_idx: usize) -> Vec<f32> {
         let mut out = vec![0.0f32; self.head_dim];
+        let stride = self.n_kv_heads * self.head_dim;
 
-        for (t, &weight) in weights.iter().enumerate() {
-            let val_offset = (t * self.n_kv_heads + kv_head_idx) * self.val_packed_bytes;
-            let packed_val = &self.vals_packed[val_offset..val_offset + self.val_packed_bytes];
-            let deq_val = self.val_quant.dequantize_vector(packed_val);
-
-            for (o, v) in out.iter_mut().zip(deq_val.iter()) {
-                *o += weight * v;
+        for (t, &w) in weights.iter().enumerate() {
+            let offset = t * stride + kv_head_idx * self.head_dim;
+            for d in 0..self.head_dim {
+                out[d] += w * self.values[offset + d].to_f32();
             }
         }
 
@@ -384,7 +452,13 @@ impl CompressedKVCache {
 
     /// Memory usage in bytes
     pub fn memory_bytes(&self) -> usize {
-        self.keys_packed.len() + self.vals_packed.len()
+        let key_bytes: usize = self.compressed_keys.iter()
+            .flat_map(|token| token.iter())
+            .map(|packed| packed.len())
+            .sum();
+        let norm_bytes = self.key_norms.len() * self.n_kv_heads * 4; // f32 norms
+        let value_bytes = self.values.len() * 2; // f16 = 2 bytes
+        key_bytes + norm_bytes + value_bytes
     }
 
     /// Memory usage if stored as f32 (uncompressed)
@@ -394,7 +468,7 @@ impl CompressedKVCache {
 
     /// Compression ratio
     pub fn compression_ratio(&self) -> f32 {
-        if self.keys_packed.is_empty() {
+        if self.seq_len == 0 {
             return 1.0;
         }
         self.uncompressed_memory_bytes() as f32 / self.memory_bytes() as f32
@@ -402,6 +476,25 @@ impl CompressedKVCache {
 }
 
 // --- Bit Packing Utilities ---
+
+/// Pack quantized indices into bytes (MSE-only, no QJL).
+fn pack_indices(indices: &[u8], bits_per_index: usize) -> Vec<u8> {
+    let total_bits = indices.len() * bits_per_index;
+    let total_bytes = total_bits.div_ceil(8);
+    let mut packed = vec![0u8; total_bytes];
+
+    let mut bit_pos = 0usize;
+    for &idx in indices {
+        for b in 0..bits_per_index {
+            if (idx >> b) & 1 == 1 {
+                packed[bit_pos / 8] |= 1 << (bit_pos % 8);
+            }
+            bit_pos += 1;
+        }
+    }
+
+    packed
+}
 
 /// Pack quantized indices and QJL sign bits into a byte vector.
 fn pack_compressed(indices: &[u8], bits_per_index: usize, qjl_signs: &[bool]) -> Vec<u8> {
@@ -568,15 +661,12 @@ mod tests {
 
     #[test]
     fn test_lloyd_max_centroids() {
-        // Verify centroids are ordered and symmetric
         for bw in 1..=4 {
             let c = LLOYD_MAX_CENTROIDS[bw - 1];
             assert_eq!(c.len(), 1 << bw);
-            // Should be sorted
             for i in 1..c.len() {
                 assert!(c[i] > c[i - 1], "centroids not sorted for {bw}-bit");
             }
-            // Should be approximately symmetric
             let n = c.len();
             for i in 0..n / 2 {
                 assert!(
@@ -609,11 +699,10 @@ mod tests {
     }
 
     #[test]
-    fn test_quantize_dequantize() {
+    fn test_quantize_dequantize_with_qjl() {
         let dim = 16;
         let tq = TurboQuant::new(3, dim, dim, 123);
 
-        // Random unit vector
         let x: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.1).sin()).collect();
         let norm: f32 = x.iter().map(|v| v * v).sum::<f32>().sqrt();
         let x: Vec<f32> = x.iter().map(|v| v / norm).collect();
@@ -621,7 +710,6 @@ mod tests {
         let packed = tq.quantize_vector(&x);
         let reconstructed = tq.dequantize_vector(&packed);
 
-        // Per-vector reconstruction won't be perfect, but should be reasonable
         let mse: f32 = x
             .iter()
             .zip(reconstructed.iter())
@@ -629,16 +717,36 @@ mod tests {
             .sum::<f32>()
             / dim as f32;
 
-        // 3-bit MSE should be < 0.2 for unit vectors
         assert!(mse < 0.2, "MSE too high: {mse}");
     }
 
     #[test]
-    fn test_asymmetric_dot_accuracy() {
+    fn test_quantize_dequantize_mse_only() {
+        let dim = 16;
+        let tq = TurboQuant::new_mse_only(3, dim, 123);
+
+        let x: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.1).sin()).collect();
+        let norm: f32 = x.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let x: Vec<f32> = x.iter().map(|v| v / norm).collect();
+
+        let packed = tq.quantize_vector(&x);
+        let reconstructed = tq.dequantize_vector(&packed);
+
+        let mse: f32 = x
+            .iter()
+            .zip(reconstructed.iter())
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f32>()
+            / dim as f32;
+
+        assert!(mse < 0.2, "MSE too high: {mse}");
+    }
+
+    #[test]
+    fn test_dot_accuracy_qjl() {
         let dim = 64;
         let tq = TurboQuant::new(3, dim, dim, 456);
 
-        // Generate random unit vectors and test inner product accuracy
         let mut rng = SplitMix64::new(789);
         let mut errors = Vec::new();
 
@@ -646,27 +754,22 @@ mod tests {
             let a: Vec<f32> = (0..dim).map(|_| rng.gaussian()).collect();
             let b: Vec<f32> = (0..dim).map(|_| rng.gaussian()).collect();
 
-            // Normalize
             let norm_a: f32 = a.iter().map(|v| v * v).sum::<f32>().sqrt();
             let norm_b: f32 = b.iter().map(|v| v * v).sum::<f32>().sqrt();
             let a: Vec<f32> = a.iter().map(|v| v / norm_a).collect();
             let b: Vec<f32> = b.iter().map(|v| v / norm_b).collect();
 
-            // True dot product
             let true_dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-
-            // Compressed dot product
             let packed_b = tq.quantize_vector(&b);
-            let est_dot = tq.asymmetric_dot(&a, &packed_b);
+            let est_dot = tq.dot(&a, &packed_b);
 
             errors.push((true_dot - est_dot).abs());
         }
 
         let mean_error = errors.iter().sum::<f32>() / errors.len() as f32;
-        // 3-bit asymmetric dot should have mean error < 0.15
         assert!(
             mean_error < 0.15,
-            "Mean absolute error too high: {mean_error}"
+            "QJL mean absolute error too high: {mean_error}"
         );
     }
 
@@ -674,9 +777,8 @@ mod tests {
     fn test_compressed_kv_cache() {
         let n_kv_heads = 2;
         let head_dim = 16;
-        let mut cache = CompressedKVCache::new(n_kv_heads, head_dim, 3, 3, 999);
+        let mut cache = CompressedKVCache::new(n_kv_heads, head_dim);
 
-        // Append some vectors
         for t in 0..10 {
             let keys: Vec<f32> = (0..n_kv_heads * head_dim)
                 .map(|i| ((t * 100 + i) as f32 * 0.01).sin())
@@ -688,19 +790,20 @@ mod tests {
         }
 
         assert_eq!(cache.seq_len(), 10);
+        // TurboQuant 3-bit keys + f16 values: compression > 2x
+        let ratio = cache.compression_ratio();
         assert!(
-            cache.compression_ratio() > 3.0,
-            "Compression ratio should be > 3x"
+            ratio > 2.0,
+            "Compression ratio should be > 2.0x with TurboQuant keys, got {ratio}",
         );
 
-        // Test attention scores
         let q: Vec<f32> = (0..head_dim).map(|i| (i as f32 * 0.1).sin()).collect();
         let scores = cache.attention_scores(&q, 0);
         assert_eq!(scores.len(), 10);
     }
 
     #[test]
-    fn test_bit_packing() {
+    fn test_bit_packing_qjl() {
         let indices = vec![0, 1, 2, 3, 1, 0, 3, 2];
         let qjl_signs = vec![true, false, true, true];
         let packed = pack_compressed(&indices, 2, &qjl_signs);
@@ -713,8 +816,17 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_sizes() {
-        // At 3-bit with dim=128:
+    fn test_bit_packing_mse_only() {
+        let indices = vec![0, 1, 2, 3, 1, 0, 3, 2];
+        let packed = pack_indices(&indices, 2);
+
+        let unpacked = unpack_indices(&packed, 2, 8);
+        assert_eq!(unpacked, indices);
+    }
+
+    #[test]
+    fn test_compression_sizes_with_qjl() {
+        // With QJL: 3-bit with dim=128
         // index bits = 3 * 128 = 384 bits = 48 bytes
         // qjl bits = 128 bits = 16 bytes
         // total = 64 bytes
@@ -723,13 +835,28 @@ mod tests {
         let tq = TurboQuant::new(3, 128, 128, 0);
         assert_eq!(tq.compressed_bytes(), 64);
 
-        // At 4-bit with dim=128:
+        // With QJL: 4-bit with dim=128
         // index bits = 4 * 128 = 512 bits = 64 bytes
         // qjl bits = 128 bits = 16 bytes
         // total = 80 bytes
-        // vs f32 = 512 bytes
         // ratio = 6.4x
         let tq4 = TurboQuant::new(4, 128, 128, 0);
         assert_eq!(tq4.compressed_bytes(), 80);
+    }
+
+    #[test]
+    fn test_compression_sizes_mse_only() {
+        // MSE-only (no QJL): 3-bit with dim=128
+        // index bits = 3 * 128 = 384 bits = 48 bytes
+        // vs f32 = 512 bytes
+        // ratio = 10.7x
+        let tq = TurboQuant::new_mse_only(3, 128, 0);
+        assert_eq!(tq.compressed_bytes(), 48);
+
+        // MSE-only: 4-bit with dim=128
+        // index bits = 4 * 128 = 512 bits = 64 bytes
+        // ratio = 8x
+        let tq4 = TurboQuant::new_mse_only(4, 128, 0);
+        assert_eq!(tq4.compressed_bytes(), 64);
     }
 }

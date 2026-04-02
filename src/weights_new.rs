@@ -67,18 +67,9 @@ impl WeightTensor {
     /// For tensors shaped [ne0, ne1, n_experts]:
     /// Expert k's bytes start at `k * bytes_per_expert`.
     pub fn expert_to_f32(&self, expert_idx: usize) -> Result<Vec<f32>> {
-        let (raw_slice, n_per_expert) = self.expert_raw_slice(expert_idx)?;
-        quant::dequantize(raw_slice, self.qtype, 1, n_per_expert)
-    }
-
-    /// Get the raw byte slice and element count for one expert's weight matrix.
-    ///
-    /// Zero-copy — returns a slice into the mmap. Use with `quant::matvec_col_major`
-    /// to avoid materializing the full f32 matrix.
-    pub fn expert_raw_slice(&self, expert_idx: usize) -> Result<(&[u8], usize)> {
         if self.shape.len() < 3 {
             return Err(anyhow!(
-                "expert_raw_slice requires 3D tensor, got {}D for {}",
+                "expert_to_f32 requires 3D tensor, got {}D for {}",
                 self.shape.len(),
                 self.name
             ));
@@ -109,7 +100,7 @@ impl WeightTensor {
                 self.name
             ));
         }
-        Ok((&raw[start..end], n_per_expert))
+        quant::dequantize(&raw[start..end], self.qtype, 1, n_per_expert)
     }
 
     /// Dequantize a single embedding row (token_embd.weight [ne0=n_embd, ne1=n_vocab]).
@@ -152,15 +143,6 @@ impl Weights {
         // SAFETY: we hold the file open for the lifetime of the Mmap.
         // We never write to the mmap slice.
         let mmap = unsafe { Mmap::map(&file)? };
-        // MADV_RANDOM: disable readahead so the kernel does not speculatively
-        // prefetch GB of weight pages into the page cache.  For a 35 B model
-        // this prevents the machine running out of physical RAM while reading
-        // layers sequentially; pages are evicted quickly after each access.
-        #[cfg(unix)]
-        {
-            use memmap2::Advice;
-            let _ = mmap.advise(Advice::Random); // best-effort; ignore error
-        }
         let mmap = Arc::new(mmap);
 
         let data_section_start = parse_header(path)?;
@@ -174,7 +156,7 @@ impl Weights {
             if total == 0 {
                 continue;
             }
-            let byte_len = t.size as usize;
+            let byte_len = tensor_byte_size(qt, total);
             let offset = (data_section_start + t.offset) as usize;
             if offset + byte_len > mmap.len() {
                 return Err(anyhow!(

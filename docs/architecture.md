@@ -102,7 +102,6 @@ Currently using CUDA PTX inline strings with cust bindings. One kernel implement
 - **matvec_kernel**: matrix-vector multiply on GPU (sm_61 PTX)
 
 Future kernels: sparse matmul, fused ops, MoE dispatch.
-Future kernels: sparse matmul, fused ops, MoE dispatch.
 
 ### 6. Multi-GPU Coordination (PLANNED)
 
@@ -247,27 +246,38 @@ Quality is guaranteed by design: every neuron is computed, just on different har
 
 ## TurboQuant KV Cache Compression
 
-TurboQuant (Google Research, ICLR 2026) compresses the KV cache to 2-4 bits per coordinate with zero accuracy loss on attention scores.
+TurboQuant (Google Research, ICLR 2026) is a **general-purpose vector quantization algorithm** that compresses vectors while preserving inner product structure. It is used here for **KV cache compression only** — not model weight quantization (which uses GGUF's own quant formats like Q4_K_M).
+
+**Important**: TurboQuant does NOT quantize model weights. Weight quantization and KV cache compression are separate concerns:
+- **Model weights**: GGUF Q4_K_M/Q5_K_M formats (block-scale quantization)
+- **KV cache**: TurboQuant 3-4 bit per coordinate (rotation + Lloyd-Max scalar quantization)
+
+### Accuracy
+
+Based on the paper and validated community implementations:
+- **3.5 bits/coordinate**: Absolute quality neutrality (no measurable degradation)
+- **2.5 bits/coordinate**: Marginal quality degradation
+- The paper's Stage 2 (QJL residual correction) actually **hurts** attention quality because softmax amplifies QJL's random variance. MSE-only compression (no QJL) is superior for attention. [Community validation: 18/18 generation tests pass with MSE-only vs 0/27 with QJL]
 
 ### How It Helps
 
 Without TurboQuant: hot neuron KV cache in 4GB VRAM → ~8K context
-With TurboQuant (3-bit): same 4GB → ~40K context
+With TurboQuant (3-bit, ~5x compression): same 4GB → ~40K context
 
 The two techniques are multiplicative:
 - Sparse execution: 3x speedup (only hot neurons on GPU)
-- TurboQuant: 6x KV cache memory savings (longer context in same VRAM)
+- TurboQuant (3-bit): ~5x KV cache memory savings (longer context in same VRAM)
 - Combined: fast GPU execution + long context on limited hardware
 
 ### Algorithm
 
-1. **Stage 1 (PolarQuant)**: Random rotation + Lloyd-Max scalar quantization per coordinate
-2. **Stage 2 (QJL)**: 1-bit sign correction for unbiased inner products
-3. **Asymmetric estimator**: Compute attention scores directly from compressed keys
+1. **Random rotation**: Multiply input by random orthogonal matrix to induce concentrated Beta distribution per coordinate
+2. **Lloyd-Max scalar quantization**: Optimal scalar quantizer per coordinate (precomputed centroids for N(0,1) distribution)
+3. **Asymmetric K/V allocation**: Keys get more bits than values (e.g., K4/V2 = 3-bit average) because keys drive attention precision while value errors cancel in the weighted sum
 
 ### Module
 
-- `src/turboquant/` — Lloyd-Max quantizer, rotation, QJL, CompressedKVCache
+- `src/turboquant/` — Lloyd-Max quantizer, rotation, CompressedKVCache
 
 ### References
 

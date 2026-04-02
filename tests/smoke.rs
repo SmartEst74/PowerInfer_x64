@@ -75,7 +75,7 @@ fn smoke_matvec_correctness() {
 #[test]
 fn smoke_turboquant_compresses_and_restores() {
     let dim = 32;
-    let tq = TurboQuant::new(3, dim, dim, 42);
+    let tq = TurboQuant::new_mse_only(3, dim, 42);
 
     let x: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.1).sin()).collect();
     let norm: f32 = x.iter().map(|v| v * v).sum::<f32>().sqrt();

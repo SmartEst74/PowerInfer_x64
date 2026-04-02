@@ -9,6 +9,7 @@ use std::time::Instant;
 use powerinfer::gguf::GgufFile;
 use powerinfer::model::InferenceContext;
 use powerinfer::runtime::BackendFactory;
+use powerinfer::sysinfo::MemoryGuard;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -19,6 +20,12 @@ fn main() -> anyhow::Result<()> {
 
     println!("=== PowerInfer_x64 Real Model Test ===");
     println!("Model: {model_path}");
+    println!();
+
+    // Step 0: Memory preflight check
+    let model_file_bytes = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
+    let guard = MemoryGuard::check();
+    guard.preflight(model_file_bytes);
     println!();
 
     // Step 1: Load GGUF
@@ -102,11 +109,33 @@ fn main() -> anyhow::Result<()> {
     println!("  Prompt: \"{prompt}\"");
 
     let start = Instant::now();
-    match ctx.generate(prompt, 10) {
-        Ok(output) => {
+    // Run just the forward pass once to inspect logits
+    let input_ids = ctx.tokenizer().encode(prompt);
+    eprintln!("  Token IDs for prompt: {:?}", &input_ids[..input_ids.len().min(10)]);
+    eprintln!("  EOS token ID: {:?}", ctx.tokenizer().eos_token_id());
+
+    let n_gen = 10;
+    match ctx.generate_timed(prompt, n_gen) {
+        Ok((output, token_times)) => {
             let elapsed = start.elapsed().as_secs_f64();
             println!("  Output: \"{output}\"");
-            println!("  Time: {elapsed:.2}s");
+            println!("  Total time: {elapsed:.2}s");
+
+            // Print per-token timing
+            if !token_times.is_empty() {
+                let prefill_ms = token_times[0] * 1000.0;
+                println!("  Prefill: {prefill_ms:.1}ms");
+                if token_times.len() > 1 {
+                    let decode_times: Vec<f64> = token_times[1..].to_vec();
+                    let avg_ms = decode_times.iter().sum::<f64>() / decode_times.len() as f64 * 1000.0;
+                    let tok_s = 1.0 / (decode_times.iter().sum::<f64>() / decode_times.len() as f64);
+                    println!("  Decode: {:.1}ms avg ({tok_s:.2} tok/s)", avg_ms);
+                    for (i, &t) in decode_times.iter().enumerate() {
+                        println!("    token {}: {:.1}ms ({:.2} tok/s)", i + 1, t * 1000.0, 1.0 / t);
+                    }
+                }
+            }
+
             println!();
             println!("=== SUCCESS ===");
             println!("Model loaded, inference ran, output produced.");

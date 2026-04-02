@@ -86,13 +86,15 @@ fn main() -> anyhow::Result<()> {
             emb_w.len()
         );
         let start = token_id * n_embd;
-        if start + n_embd <= emb_w.data.len() {
-            let emb_slice = &emb_w.data[start..start + n_embd];
+        let raw_bytes = emb_w.raw().len();
+        // embedding_row_to_f32 dequants on demand; check bounds via raw byte count
+        eprintln!("  Token {token_id} embedding start offset={start}, raw bytes={raw_bytes}");
+        if let Ok(emb_slice) = emb_w.embedding_row_to_f32(token_id) {
             let emb_min = emb_slice.iter().copied().fold(f32::INFINITY, f32::min);
             let emb_max = emb_slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let emb_mean: f32 = emb_slice.iter().sum::<f32>() / n_embd as f32;
             eprintln!("  Token {token_id} embedding: min={emb_min:.4}, max={emb_max:.4}, mean={emb_mean:.4}");
-            eprintln!("  First 10 values: {:?}", &emb_slice[..10]);
+            eprintln!("  First 10 values: {:?}", &emb_slice[..10.min(emb_slice.len())]);
         }
     }
 

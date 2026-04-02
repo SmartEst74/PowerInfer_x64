@@ -87,7 +87,7 @@ fn soak_repeated_dequantization() {
 #[test]
 fn soak_repeated_turboquant() {
     let dim = 64;
-    let tq = TurboQuant::new(3, dim, dim, 42);
+    let tq = TurboQuant::new_mse_only(3, dim, 42);
 
     for i in 0..SOAK_ITERATIONS / 10 {
         let x: Vec<f32> = (0..dim).map(|j| ((i + j) as f32 * 0.01).sin()).collect();

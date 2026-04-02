@@ -57,10 +57,22 @@ fn main() -> anyhow::Result<()> {
         "block_count",
         "attention.head_count",
         "attention.head_count_kv",
+        "attention.key_length",
+        "attention.value_length",
+        "attention.layer_norm_rms_epsilon",
         "feed_forward_length",
+        "expert_feed_forward_length",
         "rope.dimension",
+        "rope.dimension_count",
+        "rope.freq_base",
         "expert_count",
         "expert_used_count",
+        "full_attention_interval",
+        "ssm.inner_size",
+        "ssm.state_size",
+        "ssm.conv_kernel",
+        "ssm.time_step_rank",
+        "ssm.group_count",
     ] {
         let key = format!("{arch}.{suffix}");
         if let Some(val) = gguf.metadata(&key) {
@@ -74,6 +86,25 @@ fn main() -> anyhow::Result<()> {
         println!("  {} [{}] kind={}", t.name, shape.join(", "), t.kind);
     }
     println!("  Total: {}", gguf.tensors().len());
+
+    // Show per-layer weight patterns for a few layers
+    println!("\n=== Layer Weight Patterns ===");
+    let tensors = gguf.tensors();
+    for layer in [0, 1, 4, 8, 12, 20, 39] {
+        let prefix = format!("blk.{layer}.");
+        let layer_tensors: Vec<_> = tensors.iter()
+            .filter(|t| t.name.starts_with(&prefix))
+            .collect();
+        if layer_tensors.is_empty() { continue; }
+        let names: Vec<String> = layer_tensors.iter()
+            .map(|t| {
+                let short = t.name.strip_prefix(&prefix).unwrap_or(&t.name);
+                let shape: Vec<String> = t.shape.iter().map(|d| d.to_string()).collect();
+                format!("{short}[{}]k{}", shape.join(","), t.kind)
+            })
+            .collect();
+        println!("  blk.{layer}: {}", names.join("  "));
+    }
 
     Ok(())
 }
