@@ -120,7 +120,9 @@ fn main() -> anyhow::Result<()> {
             eprintln!("Output: {output:?}");
             eprintln!("Prompts: {prompts:?}");
             eprintln!("Samples: {samples}");
-            eprintln!("Profiler not yet implemented");
+            anyhow::bail!(
+                "activation profiling is not wired into the forward pass yet; use the standalone profiler only for model inspection until hot-index generation is implemented"
+            );
         }
         Commands::Serve {
             ref model,

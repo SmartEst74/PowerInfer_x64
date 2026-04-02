@@ -20,7 +20,7 @@ As of 2026-04-02, this repository is a working prototype with verified CPU infer
 - The HTTP server now generates real model-backed completions, but it is still partial overall:
   - `/v1/completions`, `/v1/chat/completions`, `/v1/models`, `/health`, and `/metrics` are live against the loaded model;
   - generation is currently greedy-only, non-streaming, and serialized behind a single model lock;
-  - the profiler CLI still parses and reports model structure, but hot-neuron index generation is not implemented yet.
+  - the profiler CLI still only inspects model structure and exits with a clear unsupported error instead of writing a profile.
 
 ## Performance Target
 
@@ -179,7 +179,7 @@ cargo run --release --features profiling --bin powerinfer-profile -- \
     --output profile.jsonl
 ```
 
-Current limitation: this path currently performs model analysis only. It does not produce a finished hot-neuron profile or index.
+Current limitation: this path currently performs model analysis only, then exits with a clear unsupported error. It does not produce a finished hot-neuron profile or index.
 
 ## Infrastructure Notes
 

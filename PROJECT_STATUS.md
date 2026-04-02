@@ -47,7 +47,7 @@ Important note: performance claims in this repo should be based on release build
 | GPU execution dispatch | Partial | Execution plan is computed, but runtime still uses CPU backend for validated generation |
 | Sparse hot-neuron execution | Not done | Main PowerInfer goal remains open |
 | Predictor | Partial | Placeholder weights and scaffolding exist |
-| Profiler | Partial | Binary inspects model structure; hot-index generation is not implemented |
+| Profiler | Partial | Binary inspects model structure and fails explicitly; hot-index generation is not implemented |
 | HTTP server | Partial | Routes and metrics work; completions are model-backed, but sampling/streaming and fuller compatibility are still incomplete |
 | Benchmark CI | Open | Tracked by issue #130 |
 

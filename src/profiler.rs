@@ -6,6 +6,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use anyhow::bail;
 use powerinfer::gguf::GgufFile;
 
 #[derive(Parser)]
@@ -46,7 +47,10 @@ fn main() -> anyhow::Result<()> {
     eprintln!("Embedding dim: {}", config.embedding_length);
     eprintln!("FFN dim: {}", config.feed_forward_length);
     eprintln!();
-    eprintln!("Profiling not yet implemented - model analysis complete.");
 
-    Ok(())
+    bail!(
+        "activation profiling is not wired into the forward pass yet; no profile was written to {}",
+        cli.output.display()
+    );
+
 }

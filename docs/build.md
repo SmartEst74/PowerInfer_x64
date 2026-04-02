@@ -97,7 +97,7 @@ cargo run --release --features profiling --bin powerinfer-profile -- \
     --output profile.jsonl
 ```
 
-Current limitation: the profiler currently performs model analysis only. It does not generate a finished hot-neuron profile or index.
+Current limitation: the profiler currently performs model analysis only, then exits with a clear unsupported error. It does not generate a finished hot-neuron profile or index.
 
 ### Inspect GGUF metadata
 
