@@ -75,6 +75,14 @@ Release-mode timing traces from the latest validation run show per-layer timings
 
 ## Reproducing The Baseline
 
+### One-command run (best for new users)
+
+```bash
+cargo run --release --features cuda --bin powerinfer-cli -- easy --model /path/to/model.gguf
+```
+
+This mode auto-detects hardware and uses sane defaults. It is the recommended first run.
+
 ### Full benchmark
 
 ```bash

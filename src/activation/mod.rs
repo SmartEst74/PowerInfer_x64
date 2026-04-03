@@ -259,6 +259,11 @@ pub struct HotLayer {
 }
 
 impl HotNeuronIndex {
+    /// Get a layer entry by layer index.
+    pub fn layer(&self, layer_idx: usize) -> Option<&HotLayer> {
+        self.layers.iter().find(|layer| layer.layer_idx == layer_idx)
+    }
+
     /// Save to JSON file
     pub fn save<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
         if let Some(parent) = path.as_ref().parent() {
@@ -276,6 +281,48 @@ impl HotNeuronIndex {
         let json = std::fs::read_to_string(path)?;
         let index: Self = serde_json::from_str(&json)?;
         Ok(index)
+    }
+
+    /// Validate that every indexed layer matches the current model layout.
+    pub fn validate_against_dims(&self, layer_dims: &[usize]) -> anyhow::Result<()> {
+        let mut seen_layers = vec![false; layer_dims.len()];
+
+        for layer in &self.layers {
+            let Some(expected_width) = layer_dims.get(layer.layer_idx).copied() else {
+                return Err(anyhow!(
+                    "hot index layer {} is out of range for model with {} layers",
+                    layer.layer_idx,
+                    layer_dims.len()
+                ));
+            };
+
+            if std::mem::replace(&mut seen_layers[layer.layer_idx], true) {
+                return Err(anyhow!(
+                    "hot index contains duplicate entries for layer {}",
+                    layer.layer_idx
+                ));
+            }
+
+            if layer.n_ff != expected_width {
+                return Err(anyhow!(
+                    "hot index layer {} expects width {}, but model layer width is {}",
+                    layer.layer_idx,
+                    layer.n_ff,
+                    expected_width
+                ));
+            }
+
+            if let Some(&bad_idx) = layer.hot_indices.iter().find(|&&idx| idx >= layer.n_ff) {
+                return Err(anyhow!(
+                    "hot index layer {} contains out-of-range index {} for width {}",
+                    layer.layer_idx,
+                    bad_idx,
+                    layer.n_ff
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     /// GPU memory needed for hot neuron weights (bytes)
@@ -516,6 +563,25 @@ mod tests {
         // 3 hot * 128 * 4 (gate) + 3 * 128 * 4 (up) + 128 * 3 * 4 (down) = 4608
         let mem = index.gpu_memory_estimate(128);
         assert_eq!(mem, 4608);
+    }
+
+    #[test]
+    fn test_validate_against_dims() {
+        let index = HotNeuronIndex {
+            version: 1,
+            threshold: 0.5,
+            min_hotness: 0.5,
+            total_samples: 4,
+            layers: vec![HotLayer {
+                layer_idx: 1,
+                hot_indices: vec![0, 2, 2, 3],
+                n_ff: 4,
+            }],
+        };
+
+        assert!(index.validate_against_dims(&[8, 4, 16]).is_ok());
+        assert!(index.validate_against_dims(&[8, 5, 16]).is_err());
+        assert!(index.validate_against_dims(&[8]).is_err());
     }
 
     #[test]

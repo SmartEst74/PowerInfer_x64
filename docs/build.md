@@ -70,6 +70,26 @@ cargo run --release --bin real_test -- /path/to/model.gguf
 
 ## Current CLI Entry Points
 
+### Easiest mode (recommended)
+
+Use this first on any machine:
+
+```bash
+cargo run --release --features cuda --bin powerinfer-cli -- easy --model /path/to/model.gguf
+```
+
+If CUDA is not available on your machine, this still works after removing `--features cuda`.
+
+```bash
+cargo run --release --bin powerinfer-cli -- easy --model /path/to/model.gguf
+```
+
+Force CPU-only (troubleshooting):
+
+```bash
+cargo run --release --bin powerinfer-cli -- easy --model /path/to/model.gguf --cpu-only
+```
+
 ### Generate text
 
 `powerinfer-cli` is subcommand-based.
@@ -82,6 +102,8 @@ cargo run --release --bin powerinfer-cli -- generate \
     --temperature 0.7 \
     --top-p 0.9
 ```
+
+Use `generate` when you need manual control. Use `easy` for automatic setup.
 
 ### Start the HTTP server
 
@@ -102,7 +124,7 @@ cargo run --release --features profiling --bin powerinfer-profile -- \
 
 If no prompt file is provided, the profiler uses a small built-in smoke prompt set.
 
-Current limitation: the profiler now emits a JSON hot index, but the runtime does not consume it yet and MoE layers currently export expert hotness rather than per-expert neuron hotness.
+Current limitation: the profiler now emits a JSON hot index and the CPU runtime can load it experimentally, but MoE layers still export expert hotness rather than per-expert neuron hotness and the GPU sparse path is still missing.
 
 ### Inspect GGUF metadata
 

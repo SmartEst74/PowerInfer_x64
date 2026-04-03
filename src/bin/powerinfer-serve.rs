@@ -8,6 +8,9 @@ fn main() -> anyhow::Result<()> {
     let model_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "model.gguf".to_string());
+    let hot_index_path = std::env::args()
+        .nth(2)
+        .or_else(|| std::env::var("HOT_INDEX").ok());
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse()
@@ -19,6 +22,7 @@ fn main() -> anyhow::Result<()> {
         model_path,
         max_concurrent: 4,
         max_queue_depth: 64,
+        hot_index_path,
     };
 
     tokio::runtime::Builder::new_multi_thread()

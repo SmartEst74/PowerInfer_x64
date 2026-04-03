@@ -152,15 +152,13 @@ impl Weights {
         // SAFETY: we hold the file open for the lifetime of the Mmap.
         // We never write to the mmap slice.
         let mmap = unsafe { Mmap::map(&file)? };
-        // MADV_RANDOM: disable readahead so the kernel does not speculatively
-        // prefetch GB of weight pages into the page cache.  For a 35 B model
-        // this prevents the machine running out of physical RAM while reading
-        // layers sequentially; pages are evicted quickly after each access.
-        #[cfg(unix)]
-        {
-            use memmap2::Advice;
-            let _ = mmap.advise(Advice::Random); // best-effort; ignore error
-        }
+        // Use default mmap advice (MADV_NORMAL).  The OS will use moderate
+        // readahead and LRU eviction — the hot working set (~2 GB of
+        // attention + active experts) stabilises in the page cache after a
+        // few tokens, avoiding constant NVMe re-reads.
+        //
+        // Previous MADV_RANDOM was counter-productive: it disabled readahead
+        // AND caused aggressive eviction, forcing re-reads every token.
         let mmap = Arc::new(mmap);
 
         let data_section_start = parse_header(path)?;
@@ -197,6 +195,45 @@ impl Weights {
         }
         Ok(Self { tensors })
     }
+
+    /// Advise the OS to pre-read the given tensors into the page cache.
+    ///
+    /// This starts async readahead so that the first forward pass doesn't
+    /// stall on NVMe I/O for every weight page.
+    #[cfg(unix)]
+    pub fn prefetch(&self, names: &[String]) {
+        use memmap2::Advice;
+        for name in names {
+            if let Some(t) = self.tensors.get(name) {
+                let slice = &t.mmap[t.offset..t.offset + t.byte_len];
+                // SAFETY: advise_range is safe — it's a hint to the kernel.
+                let _ = t.mmap.advise_range(Advice::WillNeed, t.offset, t.byte_len);
+                let _ = slice; // ensure borrow
+            }
+        }
+    }
+
+    /// Lock named tensor pages in RAM so the kernel cannot evict them.
+    /// Returns total bytes locked. Best-effort: failures are silently ignored.
+    #[cfg(unix)]
+    pub fn mlock(&self, names: &[String]) -> usize {
+        let mut total = 0usize;
+        for name in names {
+            if let Some(t) = self.tensors.get(name) {
+                let ptr = t.mmap[t.offset..].as_ptr();
+                let len = t.byte_len;
+                // SAFETY: mlock is safe — ptr/len point into a valid mmap region.
+                let ret = unsafe { libc::mlock(ptr as *const libc::c_void, len) };
+                if ret == 0 {
+                    total += len;
+                }
+            }
+        }
+        total
+    }
+
+    #[cfg(not(unix))]
+    pub fn mlock(&self, _names: &[String]) -> usize { 0 }
 
     pub fn get(&self, n: &str) -> Option<&WeightTensor> {
         self.tensors.get(n)

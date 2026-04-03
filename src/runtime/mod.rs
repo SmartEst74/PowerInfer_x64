@@ -221,7 +221,7 @@ impl CudaBackend {
     pub fn new(device_id: usize) -> Result<Self, BackendError> {
         // Validate CUDA is available by creating a context
         crate::cuda::cuda_impl::gpu_memory(device_id as u32)
-            .map_err(|e| BackendError::CudaError(e))?;
+            .map_err(BackendError::CudaError)?;
         Ok(Self {
             name: format!("CUDA:{device_id}"),
             device_id,
@@ -281,7 +281,7 @@ impl Backend for CudaBackend {
 
     fn memory_info(&self) -> Result<(usize, usize), BackendError> {
         crate::cuda::cuda_impl::gpu_memory(self.device_id as u32)
-            .map_err(|e| BackendError::CudaError(e))
+            .map_err(BackendError::CudaError)
     }
 
     fn as_any(&self) -> &dyn Any {

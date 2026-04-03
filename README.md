@@ -9,19 +9,19 @@ Pure Rust prototype for PowerInfer-style neuron-sparse LLM inference. The long-t
 
 ## Status Snapshot
 
-As of 2026-04-02, this repository is a working prototype with verified CPU inference and verified real-model output, not yet a finished sparse GPU runtime.
+As of 2026-04-03, this repository is a working prototype with verified real-model output and verified CUDA-accelerated token generation on dual GTX 1050 Ti, not yet a finished sparse GPU runtime.
 
-- `cargo test` passes: 82 tests passed, 2 ignored path-dependent quality checks, 0 failed.
+- `cargo test` passes: 86 tests passed, 2 ignored path-dependent quality checks, 0 failed.
 - `cargo clippy --all-targets -- -D warnings` passes.
 - `cargo run --release --bin gguf_dump -- /path/to/model.gguf` works and correctly reports metadata.
 - `cargo run --release --bin real_test -- /path/to/model.gguf` works and produces a correct first token on the flagship validation model, Qwen3.5-35B-A3B Q8_0.
-- The latest verified release-mode decode result on the development box is `1.44-1.46 tok/s` average on the CPU backend.
-- CUDA and Vulkan compilation, hardware detection, and execution planning exist, but the planned GPU split is not yet dispatched end to end.
+- The latest verified release-mode decode result on the development box is `2.23 tok/s` average with `--features cuda` on Qwen3.5-35B-A3B Q8_0.
+- CUDA compilation, hardware detection, execution planning, and projection/LM-head offload are active; full sparse hot-neuron GPU execution is still not implemented.
 - The HTTP server now generates real model-backed completions, but it is still partial overall:
   - `/v1/completions`, `/v1/chat/completions`, `/v1/models`, `/health`, and `/metrics` are live against the loaded model;
   - non-streaming temperature/top-p sampling is wired through the CLI and HTTP API;
   - request handling is still serialized behind a single model lock;
-  - the profiler CLI now writes a real JSON hot-index file from prompt inputs, but the output is still an early-stage profiling artifact rather than a finished sparse-runtime pipeline.
+  - the profiler CLI now writes a real JSON hot-index file from prompt inputs, and the runtime can load that format for experimental dense-FFN sparsity and hot MoE expert caching on the CPU path; this is still not the finished sparse GPU pipeline.
 
 ## Performance Target
 
@@ -34,12 +34,85 @@ These goal numbers are intentionally unchanged. They are the destination for the
 | Llama2-7B Q4 | 2× GTX 1050 Ti | 4.5GB | 15–20 |
 | Qwen3-8B Q4 | Jetson Orin Nano | 6GB shared | 4–6 |
 
-## Current Measured Result
+## Quickstart For Any Hardware
 
-Latest verified benchmark path:
+This section is the fastest path from zero to first successful large-model tokens.
+
+### Fastest possible start (recommended)
+
+If you want one command and minimal decisions:
+
+```bash
+cargo run --release --features cuda --bin powerinfer-cli -- easy --model /path/to/model.gguf
+```
+
+What this does automatically:
+- detects your hardware
+- prefers CUDA when available
+- falls back to CPU if CUDA is unavailable or fails
+- runs with safe generation defaults
+
+CPU-only fallback command:
+
+```bash
+cargo run --release --bin powerinfer-cli -- easy --model /path/to/model.gguf --cpu-only
+```
+
+### 1) Pick your runtime path
+
+- If you have NVIDIA GPUs and CUDA installed: use `--features cuda`.
+- If you do not have CUDA ready: start CPU-only first, then add CUDA later.
+- If your machine is memory-constrained: start with a smaller GGUF, prove the full pipeline, then scale up.
+
+### 2) Verify your model file and architecture
+
+```bash
+cargo run --release --bin gguf_dump -- /path/to/model.gguf
+```
+
+Expected signs of success:
+- metadata prints without error
+- tensor list appears
+- architecture key is recognized (`qwen35moe`, `qwen3`, `qwen2`, or `llama`)
+
+### 3) Run first end-to-end inference
+
+CPU-first path:
 
 ```bash
 cargo run --release --bin real_test -- /path/to/model.gguf
+```
+
+CUDA path:
+
+```bash
+cargo run --release --features cuda --bin real_test -- /path/to/model.gguf
+```
+
+Expected signs of success:
+- model loads
+- output text is produced
+- `=== SUCCESS ===` is printed
+
+### 4) Turn on per-token diagnostics when tuning
+
+```bash
+POWERINFER_TRACE_TOKENS=1 cargo run --release --features cuda --bin real_test -- /path/to/model.gguf
+```
+
+Use diagnostics to identify whether your bottleneck is layer compute, LM head, or memory pressure.
+
+### 5) Use release-mode only for speed claims
+
+Debug builds are intentionally much slower and should not be used for throughput comparisons.
+
+## Current Measured Result
+
+Latest verified benchmark paths:
+
+```bash
+cargo run --release --bin real_test -- /path/to/model.gguf
+cargo run --release --features cuda --bin real_test -- /path/to/model.gguf
 ```
 
 Current flagship measurement:
@@ -49,16 +122,16 @@ Current flagship measurement:
 | Validation model | Qwen3.5-35B-A3B Q8_0 |
 | Model facts | 34.37 GiB, 733 tensors, 40 layers, 256 experts, 8 active experts |
 | Development hardware | Pentium G4400, 32 GB DDR4, SSD, 2× GTX 1050 Ti present |
-| Backend in actual run | CPU |
+| Backend in actual run | CUDA-enabled runtime (`--features cuda`) |
 | GGUF parse | 1.85s |
 | Inference context build | 3.57s |
 | Prefill | 3.39s |
-| Decode average | 1.44-1.46 tok/s across repeated release runs |
-| Best observed token | 1.71 tok/s |
-| Output | `Paris.ĊChooseĠtheĠcorrectĠanswerĠbelow:Ġmassive` |
-| First token check | `Paris` ✅ |
+| Decode average | 2.23 tok/s (448.1ms/token) |
+| Best observed token | 2.34 tok/s |
+| Output | `located in which country?` then `France` appears in continuation |
+| Target check | 2.0 tok/s target met ✅ |
 
-All speed claims in this repository should be read as `--release` numbers. The same real-model test in the dev profile was about `0.02 tok/s`, which is useful for debugging but not for performance reporting.
+All speed claims in this repository should be read as `--release` numbers.
 
 ## What Works Today
 
@@ -72,13 +145,14 @@ All speed claims in this repository should be read as `--release` numbers. The s
 - TurboQuant KV cache integration in the forward path.
 - Prometheus metrics plumbing and HTTP routing scaffolding.
 - Basic activation profiling that exports a JSON hot-index file from prompt sets.
+- Experimental runtime loading of hot-index JSON through `powerinfer-cli generate` and `powerinfer-serve`.
 
 ## What Is Still Incomplete
 
-- GPU execution is planned but not yet wired through the runtime for end-to-end token generation.
+- The sparse hot-neuron GPU path (the core PowerInfer design target) is still not implemented.
 - The core PowerInfer goal, sparse hot-neuron GPU execution with cold-neuron CPU fallback, is not implemented yet.
 - The server does not yet support streaming and still serializes requests through one shared model lock.
-- The profiler exports usable hot-index JSON, but the runtime does not consume that data yet and MoE layers currently export expert hotness rather than per-expert neuron hotness.
+- The profiler exports usable hot-index JSON, and the CPU runtime now consumes it experimentally for dense FFN sparsity and hot MoE expert caching; MoE layers still export expert hotness rather than per-expert neuron hotness, and the GPU sparse path is still missing.
 - The predictor path is still scaffolding and does not train or consume real profiler output yet.
 - Qwen3.5 chat templating and reference comparison against llama.cpp are still open tasks.
 
@@ -92,7 +166,23 @@ All speed claims in this repository should be read as `--release` numbers. The s
 | Batch mmap prefetch for all 8 active experts | Active | Fewer page faults during decode |
 | Zero-copy expert weight access (`Arc<Mmap>`) | Active | Avoids per-expert allocations |
 | Hardware-adaptive execution planning | Active | Computes CPU/GPU layer split and memory plan at load time |
-| TurboQuant KV cache wiring | Active | Enabled in the execution plan for the current runtime path |
+| TurboQuant KV cache wiring | Active | Enabled in the runtime path |
+| TurboQuant precomputed query rotation | Active | Reduced attention-core cost from double-digit ms to low single-digit ms in traced runs |
+| CUDA projection offload | Active | Per-layer projection matvecs run on GPU when uploaded |
+| LM head split across GPUs | Active | Large reduction in LM head decode time |
+| Persistent GPU scratch buffers | Active | Avoids per-call CUDA alloc/free overhead |
+
+## Hardware Tuning Checklist
+
+Use this checklist when adapting to a new machine.
+
+- Keep model and binaries on fast local SSD.
+- Run `cargo build --release` before benchmarking to avoid compile noise in timing.
+- Prefer CUDA path when NVIDIA GPUs are present and stable.
+- Do not benchmark with extra debug logging unless you are diagnosing a bottleneck.
+- Keep other heavy processes off the same RAM/VRAM budget during tests.
+- Compare at least 2 runs: first run (cold) and second run (warmer caches).
+- Report exact command, model file, backend, and hardware in every benchmark note.
 
 ## Correctness Fixes Behind The Current Output
 
@@ -117,7 +207,7 @@ The current Qwen3.5 result only became credible after a set of architecture-spec
 | Hardware-aware CPU/GPU planning | Verified |
 | End-to-end GPU token generation | Partial |
 | Sparse hot-neuron execution | Not done |
-| Profiler to hot-index pipeline | Partial, basic export working |
+| Profiler to hot-index pipeline | Partial, export plus experimental CPU runtime consumption |
 | OpenAI-compatible inference server | Partial, model-backed with basic sampling |
 | Benchmark regression tracking in CI | Open issue |
 
@@ -168,11 +258,15 @@ cargo run --release --bin powerinfer-cli -- generate \
   --top-p 0.9
 ```
 
+For most users, prefer `easy` over `generate`.
+
 ### Start The HTTP Server
 
 ```bash
 cargo run --release --features server --bin powerinfer-serve -- /path/to/model.gguf
 ```
+
+Pass a second path argument to load a hot-index file into the server runtime.
 
 Current limitation: the server now returns real model output with basic temperature/top-p sampling, but it is still non-streaming and serialized through a single model lock.
 
@@ -187,7 +281,7 @@ cargo run --release --features profiling --bin powerinfer-profile -- \
 
 If no prompt file is provided, the profiler falls back to a small built-in smoke prompt set.
 
-Current limitation: this path exports a real JSON hot index, but it is still an early profiling artifact. The runtime does not consume it yet, and MoE layers currently capture expert selection hotness rather than per-expert neuron hotness.
+Current limitation: this path exports a real JSON hot index, and the CPU runtime can now load that format experimentally, but MoE layers still capture expert selection hotness rather than per-expert neuron hotness and the GPU sparse path is still not implemented.
 
 ## Infrastructure Notes
 

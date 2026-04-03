@@ -931,6 +931,205 @@ pub fn matvec_col_major(
     Ok(())
 }
 
+/// Compute selected output columns y[k] = x · W[:, indices[k]] from a GGML
+/// column-major weight matrix W without materializing the full output vector.
+pub fn matvec_col_major_select(
+    y: &mut [f32],
+    x: &[f32],
+    raw: &[u8],
+    qtype: QuantizationType,
+    n_in: usize,
+    n_out: usize,
+    indices: &[usize],
+) -> Result<()> {
+    debug_assert_eq!(y.len(), indices.len());
+
+    if indices.is_empty() {
+        return Ok(());
+    }
+
+    match qtype {
+        QuantizationType::Q8_0 if n_in.is_multiple_of(32) => {
+            let blocks_per_col = n_in / 32;
+            let bytes_per_col = blocks_per_col * 34;
+
+            for (slot, &col_idx) in y.iter_mut().zip(indices.iter()) {
+                if col_idx >= n_out {
+                    return Err(anyhow!(
+                        "selected column {} out of range for output width {}",
+                        col_idx,
+                        n_out
+                    ));
+                }
+
+                let col_off = col_idx * bytes_per_col;
+                let mut sum = 0.0f32;
+                for block_idx in 0..blocks_per_col {
+                    let blk_off = col_off + block_idx * 34;
+                    let scale =
+                        f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+                    let x_base = block_idx * 32;
+                    let mut block_dot = 0.0f32;
+                    for value_idx in 0..32 {
+                        block_dot +=
+                            (raw[blk_off + 2 + value_idx] as i8) as f32 * x[x_base + value_idx];
+                    }
+                    sum += block_dot * scale;
+                }
+                *slot = sum;
+            }
+            Ok(())
+        }
+        QuantizationType::F32 => {
+            for (slot, &col_idx) in y.iter_mut().zip(indices.iter()) {
+                if col_idx >= n_out {
+                    return Err(anyhow!(
+                        "selected column {} out of range for output width {}",
+                        col_idx,
+                        n_out
+                    ));
+                }
+
+                let col_off = col_idx * n_in;
+                let mut sum = 0.0f32;
+                for (row_idx, &xv) in x.iter().enumerate() {
+                    let byte_off = (col_off + row_idx) * 4;
+                    let weight = f32::from_le_bytes(
+                        raw[byte_off..byte_off + 4]
+                            .try_into()
+                            .map_err(|_| anyhow!("invalid F32 weight bytes"))?,
+                    );
+                    sum += xv * weight;
+                }
+                *slot = sum;
+            }
+            Ok(())
+        }
+        _ => {
+            let w_f32 = dequantize(raw, qtype, 1, n_in * n_out)?;
+            for (slot, &col_idx) in y.iter_mut().zip(indices.iter()) {
+                if col_idx >= n_out {
+                    return Err(anyhow!(
+                        "selected column {} out of range for output width {}",
+                        col_idx,
+                        n_out
+                    ));
+                }
+
+                let col_off = col_idx * n_in;
+                let mut sum = 0.0f32;
+                for (row_idx, &xv) in x.iter().enumerate() {
+                    sum += xv * w_f32[col_off + row_idx];
+                }
+                *slot = sum;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Compute y = W @ x where x is sparse and only `indices` are non-zero.
+///
+/// `raw` stores W in GGML column-major format with shape [ne0=n_in, ne1=n_out].
+pub fn matvec_col_major_sparse_input(
+    y: &mut [f32],
+    x: &[f32],
+    indices: &[usize],
+    raw: &[u8],
+    qtype: QuantizationType,
+    n_in: usize,
+    n_out: usize,
+) -> Result<()> {
+    debug_assert_eq!(x.len(), indices.len());
+    debug_assert_eq!(y.len(), n_out);
+
+    if x.is_empty() {
+        y.fill(0.0);
+        return Ok(());
+    }
+
+    match qtype {
+        QuantizationType::Q8_0 if n_in.is_multiple_of(32) => {
+            let blocks_per_col = n_in / 32;
+            let bytes_per_col = blocks_per_col * 34;
+
+            for (col_idx, slot) in y.iter_mut().enumerate() {
+                let col_off = col_idx * bytes_per_col;
+                let mut sum = 0.0f32;
+
+                for (&row_idx, &xv) in indices.iter().zip(x.iter()) {
+                    if row_idx >= n_in {
+                        return Err(anyhow!(
+                            "sparse input index {} out of range for input width {}",
+                            row_idx,
+                            n_in
+                        ));
+                    }
+
+                    let block_idx = row_idx / 32;
+                    let value_idx = row_idx % 32;
+                    let blk_off = col_off + block_idx * 34;
+                    let scale =
+                        f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+                    let weight = (raw[blk_off + 2 + value_idx] as i8) as f32 * scale;
+                    sum += xv * weight;
+                }
+
+                *slot = sum;
+            }
+
+            Ok(())
+        }
+        QuantizationType::F32 => {
+            for (col_idx, slot) in y.iter_mut().enumerate() {
+                let col_off = col_idx * n_in;
+                let mut sum = 0.0f32;
+
+                for (&row_idx, &xv) in indices.iter().zip(x.iter()) {
+                    if row_idx >= n_in {
+                        return Err(anyhow!(
+                            "sparse input index {} out of range for input width {}",
+                            row_idx,
+                            n_in
+                        ));
+                    }
+
+                    let byte_off = (col_off + row_idx) * 4;
+                    let weight = f32::from_le_bytes(
+                        raw[byte_off..byte_off + 4]
+                            .try_into()
+                            .map_err(|_| anyhow!("invalid F32 weight bytes"))?,
+                    );
+                    sum += xv * weight;
+                }
+
+                *slot = sum;
+            }
+
+            Ok(())
+        }
+        _ => {
+            let w_f32 = dequantize(raw, qtype, 1, n_in * n_out)?;
+            for (col_idx, slot) in y.iter_mut().enumerate() {
+                let col_off = col_idx * n_in;
+                let mut sum = 0.0f32;
+                for (&row_idx, &xv) in indices.iter().zip(x.iter()) {
+                    if row_idx >= n_in {
+                        return Err(anyhow!(
+                            "sparse input index {} out of range for input width {}",
+                            row_idx,
+                            n_in
+                        ));
+                    }
+                    sum += xv * w_f32[col_off + row_idx];
+                }
+                *slot = sum;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// SwiGLU FFN directly on quantized weight bytes — avoids materializing f32 matrices.
 ///
 /// ffn(x) = down_w @ (SiLU(gate_w @ x) * (up_w @ x))
@@ -966,9 +1165,66 @@ pub fn ffn_swiglu_q(
     Ok(())
 }
 
+/// Sparse SwiGLU FFN that only evaluates selected hidden units.
+#[allow(clippy::too_many_arguments)]
+pub fn ffn_swiglu_q_selected(
+    out: &mut [f32],
+    x: &[f32],
+    gate_raw: &[u8],
+    up_raw: &[u8],
+    down_raw: &[u8],
+    qtype: QuantizationType,
+    n_embd: usize,
+    n_ff: usize,
+    selected_indices: &[usize],
+) -> Result<()> {
+    if selected_indices.is_empty() {
+        out.fill(0.0);
+        return Ok(());
+    }
+
+    if selected_indices.len() >= n_ff {
+        return ffn_swiglu_q(out, x, gate_raw, up_raw, down_raw, qtype, n_embd, n_ff);
+    }
+
+    let mut gate = vec![0.0f32; selected_indices.len()];
+    let mut up = vec![0.0f32; selected_indices.len()];
+
+    matvec_col_major_select(
+        &mut gate,
+        x,
+        gate_raw,
+        qtype,
+        n_embd,
+        n_ff,
+        selected_indices,
+    )?;
+    matvec_col_major_select(
+        &mut up,
+        x,
+        up_raw,
+        qtype,
+        n_embd,
+        n_ff,
+        selected_indices,
+    )?;
+
+    for i in 0..selected_indices.len() {
+        let sig = 1.0 / (1.0 + (-gate[i]).exp());
+        gate[i] = gate[i] * sig * up[i];
+    }
+
+    matvec_col_major_sparse_input(out, &gate, selected_indices, down_raw, qtype, n_ff, n_embd)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pack_f32(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|value| value.to_le_bytes()).collect()
+    }
 
     #[test]
     fn test_dequant_q4_0_roundtrip() {
@@ -1010,6 +1266,147 @@ mod tests {
         matvec_f32(&mut y, &x, &w, 2, 2);
         assert!((y[0] - 11.0).abs() < 1e-6);
         assert!((y[1] - 17.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_matvec_col_major_select_f32() {
+        let n_in = 3;
+        let n_out = 4;
+        let raw = pack_f32(&[
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0,
+            10.0, 11.0, 12.0,
+        ]);
+        let x = [0.5f32, -1.0, 2.0];
+
+        let mut dense = vec![0.0f32; n_out];
+        matvec_col_major(&mut dense, &x, &raw, QuantizationType::F32, n_in, n_out).unwrap();
+
+        let indices = [1usize, 3usize];
+        let mut selected = vec![0.0f32; indices.len()];
+        matvec_col_major_select(
+            &mut selected,
+            &x,
+            &raw,
+            QuantizationType::F32,
+            n_in,
+            n_out,
+            &indices,
+        )
+        .unwrap();
+
+        assert!((selected[0] - dense[1]).abs() < 1e-6);
+        assert!((selected[1] - dense[3]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_matvec_col_major_sparse_input_f32() {
+        let n_in = 4;
+        let n_out = 3;
+        let raw = pack_f32(&[
+            1.0, 2.0, 3.0, 4.0,
+            5.0, 6.0, 7.0, 8.0,
+            9.0, 10.0, 11.0, 12.0,
+        ]);
+        let indices = [1usize, 3usize];
+        let sparse_x = [2.0f32, -1.0];
+        let mut dense_x = vec![0.0f32; n_in];
+        dense_x[1] = sparse_x[0];
+        dense_x[3] = sparse_x[1];
+
+        let mut expected = vec![0.0f32; n_out];
+        matvec_col_major(
+            &mut expected,
+            &dense_x,
+            &raw,
+            QuantizationType::F32,
+            n_in,
+            n_out,
+        )
+        .unwrap();
+
+        let mut actual = vec![0.0f32; n_out];
+        matvec_col_major_sparse_input(
+            &mut actual,
+            &sparse_x,
+            &indices,
+            &raw,
+            QuantizationType::F32,
+            n_in,
+            n_out,
+        )
+        .unwrap();
+
+        for (lhs, rhs) in actual.iter().zip(expected.iter()) {
+            assert!((*lhs - *rhs).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_ffn_swiglu_q_selected_f32() {
+        let n_embd = 2;
+        let n_ff = 4;
+        let gate_raw = pack_f32(&[
+            0.5, -0.1,
+            1.0, 0.25,
+            -0.5, 0.75,
+            0.2, 0.4,
+        ]);
+        let up_raw = pack_f32(&[
+            1.0, 0.5,
+            -0.25, 0.75,
+            0.6, -0.3,
+            0.9, 0.1,
+        ]);
+        let down_raw = pack_f32(&[
+            0.1, 0.2, 0.3, 0.4,
+            -0.5, 0.25, 0.15, 0.35,
+        ]);
+        let x = [0.3f32, -0.7];
+        let indices = [1usize, 3usize];
+
+        let mut actual = vec![0.0f32; n_embd];
+        ffn_swiglu_q_selected(
+            &mut actual,
+            &x,
+            &gate_raw,
+            &up_raw,
+            &down_raw,
+            QuantizationType::F32,
+            n_embd,
+            n_ff,
+            &indices,
+        )
+        .unwrap();
+
+        let mut gate = vec![0.0f32; n_ff];
+        let mut up = vec![0.0f32; n_ff];
+        matvec_col_major(&mut gate, &x, &gate_raw, QuantizationType::F32, n_embd, n_ff).unwrap();
+        matvec_col_major(&mut up, &x, &up_raw, QuantizationType::F32, n_embd, n_ff).unwrap();
+
+        for idx in 0..n_ff {
+            let sig = 1.0 / (1.0 + (-gate[idx]).exp());
+            gate[idx] = gate[idx] * sig * up[idx];
+            if !indices.contains(&idx) {
+                gate[idx] = 0.0;
+            }
+        }
+
+        let mut expected = vec![0.0f32; n_embd];
+        matvec_col_major(
+            &mut expected,
+            &gate,
+            &down_raw,
+            QuantizationType::F32,
+            n_ff,
+            n_embd,
+        )
+        .unwrap();
+
+        for (lhs, rhs) in actual.iter().zip(expected.iter()) {
+            assert!((*lhs - *rhs).abs() < 1e-6);
+        }
     }
 
     #[test]

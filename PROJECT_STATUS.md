@@ -10,7 +10,7 @@ PowerInfer_x64 has moved past the "scaffold only" stage. The repository now has 
 
 ## Verified As Of This Snapshot
 
-- `cargo test`: 82 passed, 2 ignored, 0 failed.
+- `cargo test`: 86 passed, 2 ignored, 0 failed.
 - `cargo clippy --all-targets -- -D warnings`: pass.
 - `cargo run --release --bin gguf_dump -- /path/to/model.gguf`: verified.
 - `cargo run --release --bin real_test -- /path/to/model.gguf`: verified.
@@ -47,7 +47,7 @@ Important note: performance claims in this repo should be based on release build
 | GPU execution dispatch | Partial | Execution plan is computed, but runtime still uses CPU backend for validated generation |
 | Sparse hot-neuron execution | Not done | Main PowerInfer goal remains open |
 | Predictor | Partial | Placeholder weights and scaffolding exist |
-| Profiler | Partial | Binary now exports hot-index JSON from prompt sets, but the runtime does not consume it yet |
+| Profiler | Partial | Binary exports hot-index JSON and the CPU runtime now consumes it experimentally, but the GPU sparse path is still missing |
 | HTTP server | Partial | Routes and metrics work; completions are model-backed and support basic sampling, but streaming and fuller compatibility are still incomplete |
 | Benchmark CI | Open | Tracked by issue #130 |
 
@@ -87,7 +87,7 @@ Important note: performance claims in this repo should be based on release build
 
 ## Immediate Next Steps
 
-1. Consume the exported hot-index data in the runtime so profiling work can drive sparse execution experiments.
+1. Push the current hot-index consumer beyond the experimental CPU path and into the real sparse GPU runtime.
 2. Wire actual CUDA execution into the runtime instead of stopping at execution planning.
 3. Compare logits and token sequences against llama.cpp for the validated Qwen3.5 path.
 4. Add streaming and compatibility hardening on top of the now-working sampled server path.

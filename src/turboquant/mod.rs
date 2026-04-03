@@ -239,6 +239,77 @@ impl TurboQuant {
         self.asymmetric_dot(q, packed_key)
     }
 
+    /// Precompute the rotated query and QJL projections for a given query vector.
+    /// Returns (q_rot, qjl_projections) that can be reused across all key positions.
+    pub fn precompute_query(&self, q: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        debug_assert_eq!(q.len(), self.dim);
+        let scale = (self.dim as f32).sqrt();
+        let inv_scale = 1.0 / scale;
+
+        // Rotate query: q_rot = R @ q  (O(dim²), done once per head)
+        let mut q_rot = vec![0.0f32; self.dim];
+        for i in 0..self.dim {
+            let row = &self.rotation[i * self.dim..(i + 1) * self.dim];
+            let mut sum = 0.0f32;
+            for j in 0..self.dim {
+                sum += row[j] * q[j];
+            }
+            q_rot[i] = sum;
+        }
+
+        // Precompute QJL projections (O(qjl_bits × dim), done once per head)
+        let mut qjl_proj = vec![0.0f32; self.qjl_bits];
+        for i in 0..self.qjl_bits {
+            let row = &self.qjl_matrix[i * self.dim..(i + 1) * self.dim];
+            let mut proj = 0.0f32;
+            for j in 0..self.dim {
+                proj += row[j] * q_rot[j];
+            }
+            qjl_proj[i] = proj * inv_scale;
+        }
+
+        // Also scale q_rot for the MSE dot product
+        for v in &mut q_rot {
+            *v *= inv_scale;
+        }
+
+        (q_rot, qjl_proj)
+    }
+
+    /// Fast dot product using precomputed query data.
+    /// O(dim + qjl_bits) per call instead of O(dim² + dim × qjl_bits).
+    pub fn dot_precomputed(&self, q_rot_scaled: &[f32], qjl_proj_scaled: &[f32], packed_key: &[u8]) -> f32 {
+        let indices = unpack_indices(packed_key, self.bits, self.dim);
+
+        // MSE dot: <q_rot_scaled, k_quantized>
+        let mut mse_dot = 0.0f32;
+        for i in 0..self.dim {
+            mse_dot += q_rot_scaled[i] * self.centroids[indices[i] as usize];
+        }
+
+        if self.qjl_bits == 0 {
+            return mse_dot;
+        }
+
+        // QJL correction using precomputed projections
+        let qjl_signs = unpack_qjl_signs(packed_key, self.bits, self.dim, self.qjl_bits);
+        let distortion = self.expected_distortion();
+        let scale = (self.dim as f32).sqrt();
+        let inv_scale = 1.0 / scale;
+        let residual_norm = (distortion * inv_scale).sqrt();
+
+        let mut qjl_dot = 0.0f32;
+        for i in 0..self.qjl_bits {
+            let sign = if qjl_signs[i] { 1.0 } else { -1.0 };
+            qjl_dot += qjl_proj_scaled[i] * sign;
+        }
+
+        let qjl_scale = (std::f32::consts::PI / (2.0 * self.qjl_bits as f32)).sqrt();
+        let correction = residual_norm * qjl_scale * qjl_dot;
+
+        mse_dot + correction
+    }
+
     /// Compute attention score using the QJL asymmetric estimator.
     ///
     /// This is the core operation from the paper — produces unbiased inner product
@@ -415,11 +486,20 @@ impl CompressedKVCache {
         let tq = &self.key_quantizers[kv_head_idx];
         let mut scores = vec![0.0f32; self.seq_len];
 
-        for t in 0..self.seq_len {
-            let packed_key = &self.compressed_keys[t][kv_head_idx];
-            let key_norm = self.key_norms[t][kv_head_idx];
-            // dot(q, k) ≈ ||k|| × TurboQuant.dot(q, k/||k||)
-            scores[t] = key_norm * tq.dot(q_head, packed_key) * scale;
+        if tq.qjl_bits > 0 {
+            // Precompute rotated query + QJL projections ONCE per head
+            let (q_rot, qjl_proj) = tq.precompute_query(q_head);
+            for t in 0..self.seq_len {
+                let packed_key = &self.compressed_keys[t][kv_head_idx];
+                let key_norm = self.key_norms[t][kv_head_idx];
+                scores[t] = key_norm * tq.dot_precomputed(&q_rot, &qjl_proj, packed_key) * scale;
+            }
+        } else {
+            for t in 0..self.seq_len {
+                let packed_key = &self.compressed_keys[t][kv_head_idx];
+                let key_norm = self.key_norms[t][kv_head_idx];
+                scores[t] = key_norm * tq.dot(q_head, packed_key) * scale;
+            }
         }
 
         scores
@@ -436,6 +516,8 @@ impl CompressedKVCache {
         let stride = self.n_kv_heads * self.head_dim;
 
         for (t, &w) in weights.iter().enumerate() {
+            // Skip negligible weights — after softmax most positions contribute < 1e-7
+            if w < 1e-7 { continue; }
             let offset = t * stride + kv_head_idx * self.head_dim;
             for d in 0..self.head_dim {
                 out[d] += w * self.values[offset + d].to_f32();

@@ -35,6 +35,7 @@ pub struct ServerConfig {
     pub model_path: String,
     pub max_concurrent: usize,
     pub max_queue_depth: usize,
+    pub hot_index_path: Option<String>,
 }
 
 /// OpenAI-style request: Completions
@@ -263,10 +264,24 @@ pub fn build_router(state: AppState) -> Router {
 /// Start the HTTP server
 pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
     info!("Loading model from: {}", config.model_path);
-    let ctx = InferenceContext::from_gguf(
+    let mut ctx = InferenceContext::from_gguf(
         &config.model_path,
         crate::runtime::BackendFactory::cpu(),
     )?;
+
+    if let Some(hot_index_path) = &config.hot_index_path {
+        let index = crate::activation::HotNeuronIndex::load(hot_index_path)?;
+        let indexed_layers = index.layers.len();
+        let indexed_units: usize = index.layers.iter().map(|layer| layer.hot_indices.len()).sum();
+        ctx.set_hot_index(index)?;
+        info!(
+            "Loaded hot index from {} ({} layers, {} tracked units)",
+            hot_index_path,
+            indexed_layers,
+            indexed_units
+        );
+    }
+
     info!(
         "Model loaded: {} ({} layers)",
         ctx.config().name.as_deref().unwrap_or("unknown"),
@@ -483,6 +498,7 @@ mod tests {
             model_path: "test.gguf".to_string(),
             max_concurrent: 4,
             max_queue_depth: 64,
+            hot_index_path: None,
         };
     }
 }
