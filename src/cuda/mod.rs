@@ -498,4 +498,31 @@ EXIT:
             Some(self.devices[lw.device_idx].matvec(y, x, buf, *n_out, *n_in))
         }
     }
+
+    impl Drop for GpuResources {
+        fn drop(&mut self) {
+            // Ensure each GPU context is current before its resources are freed.
+            // Without this, the CUDA driver segfaults at process exit because
+            // DeviceBuffers try to cuMemFree on a stale context.
+            // Drop layer weights and LM head first (they hold DeviceBuffers).
+            for (_, lw) in self.layers.drain() {
+                let dev = &self.devices[lw.device_idx];
+                let _ = dev.make_current();
+                drop(lw.buffers);
+            }
+            if let Some(parts) = self.lm_head.take() {
+                for part in parts {
+                    let dev = &self.devices[part.device_idx];
+                    let _ = dev.make_current();
+                    drop(part.buffer);
+                }
+            }
+            // Now drop devices in reverse order (stream, then context).
+            for dev in self.devices.iter() {
+                let _ = dev.make_current();
+                // scratch buffers freed here when GpuDevice drops
+            }
+        }
+    }
 }
+

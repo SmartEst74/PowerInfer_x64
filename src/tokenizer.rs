@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::gguf::GgufFile;
 use anyhow::anyhow;
+use regex::Regex;
 
 /// GPT-2 byte-to-unicode mapping.
 ///
@@ -39,6 +40,25 @@ fn gpt2_unicode_to_byte() -> HashMap<char, u8> {
         .collect()
 }
 
+/// A segment of text that is either a special token or plain text for BPE encoding.
+enum TokenSegment {
+    Special(u32),
+    Text(String),
+}
+
+/// Pretokenizer type determining how text is split before BPE
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PreTokenizerType {
+    /// No pretokenization (legacy)
+    None,
+    /// GPT-2 style pretokenization
+    Gpt2,
+    /// Qwen2 pretokenization
+    Qwen2,
+    /// Qwen3.5 pretokenization (adds \p{M} to letter class)
+    Qwen35,
+}
+
 /// Simple BPE tokenizer loaded from GGUF
 pub struct Tokenizer {
     /// Token ID → string piece (in GPT-2 unicode encoding for byte-level models)
@@ -61,6 +81,13 @@ pub struct Tokenizer {
     byte_to_char: [char; 256],
     /// GPT-2: unicode character → original byte value
     char_to_byte: HashMap<char, u8>,
+    /// Special/control tokens that must be matched as whole strings before BPE.
+    /// Sorted longest-first for greedy matching.
+    special_tokens: Vec<(String, u32)>,
+    /// Pretokenizer type (determines regex for splitting before BPE)
+    _pre_type: PreTokenizerType,
+    /// Compiled pretokenization regex (if applicable)
+    pre_regex: Option<Regex>,
 }
 
 impl Tokenizer {
@@ -161,6 +188,61 @@ impl Tokenizer {
         let byte_to_char = gpt2_byte_to_unicode();
         let char_to_byte = gpt2_unicode_to_byte();
 
+        // Load special/control tokens from token_type metadata.
+        // Type 3 = control, type 4 = user_defined — these must be matched as
+        // whole strings before BPE encoding.
+        let mut special_tokens = Vec::new();
+        if let Some(types_val) = gguf.metadata("tokenizer.ggml.token_type") {
+            if let Some(types_arr) = types_val.as_array() {
+                for (i, type_val) in types_arr.iter().enumerate() {
+                    let t = type_val.as_u64().unwrap_or(0);
+                    if (t == 3 || t == 4) && i < vocab.len() {
+                        special_tokens.push((vocab[i].clone(), i as u32));
+                    }
+                }
+            }
+        }
+        // Sort longest-first for greedy matching
+        special_tokens.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        // Detect pretokenizer type from GGUF metadata
+        let pre_type_str = gguf
+            .metadata("tokenizer.ggml.pre")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let pre_type = match pre_type_str {
+            "qwen35" => PreTokenizerType::Qwen35,
+            "qwen2" | "deepseek-r1-qwen" => PreTokenizerType::Qwen2,
+            "default" if model_type == "gpt2" => PreTokenizerType::Gpt2,
+            _ if model_type == "gpt2" => PreTokenizerType::Gpt2,
+            _ => PreTokenizerType::None,
+        };
+
+        // Compile pretokenization regex
+        // These patterns match llama.cpp's pretokenizer regexes.
+        // Note: \s+(?!\S) requires a negative lookahead which the `regex` crate
+        // doesn't support. We use \s+ and post-process to simulate the effect:
+        // trim the last char from pure-whitespace matches preceding non-whitespace.
+        let pre_regex = match pre_type {
+            PreTokenizerType::Qwen35 => Some(Regex::new(concat!(
+                r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])",
+                r"|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+",
+                r"|\p{N}",
+                r"| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*",
+                r"|\s*[\r\n]+",
+                r"|\s+",
+            )).expect("invalid qwen35 pretokenizer regex")),
+            PreTokenizerType::Qwen2 | PreTokenizerType::Gpt2 => Some(Regex::new(concat!(
+                r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])",
+                r"|[^\r\n\p{L}\p{N}]?\p{L}+",
+                r"|\p{N}",
+                r"| ?[^\s\p{L}\p{N}]+[\r\n]*",
+                r"|\s*[\r\n]+",
+                r"|\s+",
+            )).expect("invalid gpt2/qwen2 pretokenizer regex")),
+            PreTokenizerType::None => None,
+        };
+
         Ok(Self {
             vocab,
             scores,
@@ -172,14 +254,16 @@ impl Tokenizer {
             uses_byte_level,
             byte_to_char,
             char_to_byte,
+            special_tokens,
+            _pre_type: pre_type,
+            pre_regex,
         })
     }
 
     /// Encode a string into token IDs using BPE.
     ///
-    /// For GPT-2 byte-level vocabularies (Qwen, GPT-2, etc.) each byte of the
-    /// input is mapped to its GPT-2 unicode character, then BPE merges are applied.
-    /// For SentencePiece vocabularies the legacy word-by-word path is used.
+    /// Special/control tokens (e.g. `<|im_start|>`) are matched as whole strings
+    /// before BPE encoding. The remaining text segments are encoded with BPE.
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut tokens = Vec::new();
 
@@ -188,46 +272,153 @@ impl Tokenizer {
             tokens.push(bos);
         }
 
-        if self.uses_byte_level {
-            // GPT-2 byte-level BPE: convert each byte to its GPT-2 unicode
-            // character, look up the single-character token, then apply BPE
-            // merges on the full sequence.
-            let mut initial = Vec::with_capacity(text.len());
-            for &byte in text.as_bytes() {
-                let ch = self.byte_to_char[byte as usize];
-                let ch_str = ch.to_string();
-                if let Some(&id) = self.token_to_id.get(&ch_str) {
-                    initial.push(id);
-                }
-                // All 256 byte values should have a token in GPT-2 vocabs.
-            }
-            self.apply_bpe_merges(&mut initial);
-            tokens.extend(initial);
-        } else {
-            // Legacy SentencePiece / word-by-word path
-            for word in text.split_whitespace() {
-                let word_tokens = self.tokenize_word(word);
-                tokens.extend(word_tokens);
-
-                if let Some(&space_id) = self.token_to_id.get(" ") {
-                    tokens.push(space_id);
-                }
-            }
-
-            // Remove trailing space token
-            if let Some(bos) = self.bos_token_id {
-                if tokens.last() == self.token_to_id.get(" ").copied().as_ref()
-                    && tokens.len() > 1
-                    && tokens[tokens.len() - 2] != bos
-                {
-                    tokens.pop();
-                }
-            } else if tokens.last() == self.token_to_id.get(" ").copied().as_ref() {
-                tokens.pop();
+        // Split text around special tokens, encoding each segment
+        let segments = self.split_special_tokens(text);
+        for segment in segments {
+            match segment {
+                TokenSegment::Special(id) => tokens.push(id),
+                TokenSegment::Text(s) => tokens.extend(self.encode_text(&s)),
             }
         }
 
         tokens
+    }
+
+    /// Split text into alternating text/special-token segments.
+    /// Special tokens are matched greedily (longest first).
+    fn split_special_tokens(&self, text: &str) -> Vec<TokenSegment> {
+        if self.special_tokens.is_empty() {
+            return vec![TokenSegment::Text(text.to_string())];
+        }
+
+        let mut segments = Vec::new();
+        let mut remaining = text;
+
+        while !remaining.is_empty() {
+            // Try to match a special token at the current position
+            let mut matched = false;
+            for (special_str, token_id) in &self.special_tokens {
+                if remaining.starts_with(special_str.as_str()) {
+                    segments.push(TokenSegment::Special(*token_id));
+                    remaining = &remaining[special_str.len()..];
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                // Find the next special token occurrence
+                let mut next_pos = remaining.len();
+                for (special_str, _) in &self.special_tokens {
+                    if let Some(pos) = remaining.find(special_str.as_str()) {
+                        if pos < next_pos {
+                            next_pos = pos;
+                        }
+                    }
+                }
+                // Everything before the next special token is plain text
+                segments.push(TokenSegment::Text(remaining[..next_pos].to_string()));
+                remaining = &remaining[next_pos..];
+            }
+        }
+
+        segments
+    }
+
+    /// Encode a plain text segment (no special tokens) using BPE.
+    fn encode_text(&self, text: &str) -> Vec<u32> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+
+        if self.uses_byte_level {
+            // Pretokenize: split text into chunks, then BPE each chunk independently
+            let chunks = self.pretokenize(text);
+            let mut result = Vec::new();
+            for chunk in &chunks {
+                let mut initial = Vec::with_capacity(chunk.len());
+                for &byte in chunk.as_bytes() {
+                    let ch = self.byte_to_char[byte as usize];
+                    let ch_str = ch.to_string();
+                    if let Some(&id) = self.token_to_id.get(&ch_str) {
+                        initial.push(id);
+                    }
+                }
+                self.apply_bpe_merges(&mut initial);
+                result.extend(initial);
+            }
+            result
+        } else {
+            // Legacy SentencePiece / word-by-word path
+            let mut result = Vec::new();
+            for word in text.split_whitespace() {
+                let word_tokens = self.tokenize_word(word);
+                result.extend(word_tokens);
+
+                if let Some(&space_id) = self.token_to_id.get(" ") {
+                    result.push(space_id);
+                }
+            }
+
+            // Remove trailing space token
+            if result.last() == self.token_to_id.get(" ").copied().as_ref() {
+                result.pop();
+            }
+            result
+        }
+    }
+
+    /// Split text into pretokenization chunks using the model's regex.
+    ///
+    /// This implements the pretokenization step that GPT-2/Qwen tokenizers use
+    /// before BPE. Each chunk is independently BPE-encoded, preventing merges
+    /// across word boundaries.
+    ///
+    /// The `\s+(?!\S)` lookahead pattern (used in the reference implementation)
+    /// is simulated by post-processing: pure-whitespace chunks longer than 1 char
+    /// that precede non-whitespace have their last char moved to the next chunk.
+    fn pretokenize(&self, text: &str) -> Vec<String> {
+        let re = match &self.pre_regex {
+            Some(re) => re,
+            None => {
+                // No pretokenization: return the entire text as one chunk
+                return vec![text.to_string()];
+            }
+        };
+
+        // Collect regex matches
+        let mut chunks: Vec<String> = re.find_iter(text).map(|m| m.as_str().to_string()).collect();
+
+        // Post-process to simulate \s+(?!\S) behavior:
+        // When a pure-whitespace chunk (>1 char) precedes a non-whitespace chunk,
+        // move the last whitespace character to the next chunk. This causes words
+        // to absorb a leading space (e.g. "    if" → "   " + " if").
+        let mut i = 0;
+        while i < chunks.len() {
+            let is_pure_ws = chunks[i].chars().all(|c| c.is_whitespace());
+            let char_count = chunks[i].chars().count();
+            let next_starts_nonws = i + 1 < chunks.len()
+                && chunks[i + 1]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_whitespace());
+
+            if is_pure_ws && char_count > 1 && next_starts_nonws {
+                // Split: all but last char stays, last char prepends to next chunk
+                let last_char_start = chunks[i]
+                    .char_indices()
+                    .next_back()
+                    .map(|(idx, _)| idx)
+                    .unwrap();
+                let suffix = chunks[i][last_char_start..].to_string();
+                chunks[i].truncate(last_char_start);
+                chunks[i + 1] = format!("{suffix}{}", chunks[i + 1]);
+            }
+            i += 1;
+        }
+
+        // Remove empty chunks that could result from post-processing
+        chunks.retain(|c| !c.is_empty());
+        chunks
     }
 
     /// Tokenize a single word into initial tokens, then apply BPE merges

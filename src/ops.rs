@@ -66,6 +66,92 @@ pub fn apply_rope(
     }
 }
 
+/// Pre-compute IMRoPE frequency array for sectioned RoPE.
+///
+/// Returns a vector of `n_rot/2` frequency values that account for
+/// interleaved dimension assignment (text-only: t/h/w tracks identical).
+/// Matches ggml's `ggml_mrope_cache_init` with `is_imrope=true`,
+/// `indep_sects=false` (text mode, rope_type=40 / GGML_ROPE_TYPE_IMROPE).
+///
+/// Each freq[k] = theta_scale^k where theta_scale = base^(-2/n_rot).
+/// The final angle for pair k at position p is: p * freq[k].
+pub fn compute_imrope_freqs(base_freq: f32, n_rot: usize, sections: &[i32; 4]) -> Vec<f32> {
+    let theta_scale = base_freq.powf(-2.0 / n_rot as f32);
+    let sect_dims = (sections[0] + sections[1] + sections[2] + sections[3]) as usize;
+    let n_pairs = n_rot / 2;
+
+    let mut freqs = Vec::with_capacity(n_pairs);
+    // All four theta tracks start at 1.0 and advance together.
+    // For text-only inference, all position tracks are identical,
+    // so the interleaving doesn't change the result.
+    // indep_sects is false for text IMROPE (only true for vision).
+    let mut theta_t: f32 = 1.0;
+    let mut theta_h: f32 = 1.0;
+    let mut theta_w: f32 = 1.0;
+    let mut theta_e: f32 = 1.0;
+
+    for pair in 0..n_pairs {
+        let sector = if sect_dims > 0 { pair % sect_dims } else { pair };
+
+        // IMRoPE interleaved assignment: [t, h, w, t, h, w, ...]
+        let theta = if sector % 3 == 0 && sector < 3 * sections[0] as usize {
+            theta_t
+        } else if sector % 3 == 1 && sector < 3 * sections[1] as usize {
+            theta_h
+        } else if sector % 3 == 2 && sector < 3 * sections[2] as usize {
+            theta_w
+        } else {
+            theta_e
+        };
+
+        // Store theta directly: angle = position * theta = position * theta_scale^k
+        freqs.push(theta);
+
+        // All tracks advance every iteration (matching ggml behavior)
+        theta_t *= theta_scale;
+        theta_h *= theta_scale;
+        theta_w *= theta_scale;
+        theta_e *= theta_scale;
+    }
+
+    freqs
+}
+
+/// Apply RoPE with pre-computed IMRoPE frequencies using NeoX-style pairing.
+///
+/// Uses the frequency array from `compute_imrope_freqs`.
+/// NeoX pairing: pair (dim[i], dim[i + half]) where half = freqs.len().
+/// Only the first `2*freqs.len()` dimensions are rotated; the rest are unchanged.
+/// This matches GGML's `rotate_pairs` with `n_offset = n_dims/2` for IMROPE/NEOX types.
+pub fn apply_rope_with_freqs(
+    q: &mut [f32],
+    k: &mut [f32],
+    position: usize,
+    head_dim: usize,
+    freqs: &[f32],
+) {
+    let half = freqs.len(); // n_rot / 2
+    for (i, &freq) in freqs.iter().enumerate() {
+        let theta = position as f32 * freq;
+        let cos_theta = theta.cos();
+        let sin_theta = theta.sin();
+
+        if i + half < head_dim {
+            let q0 = q[i];
+            let q1 = q[i + half];
+            q[i] = q0 * cos_theta - q1 * sin_theta;
+            q[i + half] = q0 * sin_theta + q1 * cos_theta;
+        }
+
+        if i + half < head_dim {
+            let k0 = k[i];
+            let k1 = k[i + half];
+            k[i] = k0 * cos_theta - k1 * sin_theta;
+            k[i + half] = k0 * sin_theta + k1 * cos_theta;
+        }
+    }
+}
+
 /// Softmax over a slice (in-place)
 pub fn softmax(x: &mut [f32]) {
     if x.is_empty() {

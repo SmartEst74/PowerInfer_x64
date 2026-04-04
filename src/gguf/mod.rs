@@ -197,6 +197,22 @@ impl GgufFile {
             .map(|n| n as usize)
     }
 
+    /// Get rope dimension sections (e.g., [11,11,10,0] for IMRoPE in Qwen3.5)
+    pub fn rope_dimension_sections(&self) -> Option<[i32; 4]> {
+        let val = self.get_config("rope.dimension_sections")?;
+        let arr = val.as_array()?;
+        if arr.len() >= 4 {
+            Some([
+                arr[0].as_i64().unwrap_or(0) as i32,
+                arr[1].as_i64().unwrap_or(0) as i32,
+                arr[2].as_i64().unwrap_or(0) as i32,
+                arr[3].as_i64().unwrap_or(0) as i32,
+            ])
+        } else {
+            None
+        }
+    }
+
     /// Build model configuration structure
     pub fn model_config(&self) -> Result<ModelConfig> {
         let n_heads = self.attention_head_count()?;
@@ -231,6 +247,7 @@ impl GgufFile {
                 .get_config("rope.freq_base")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(10000.0) as f32,
+            rope_sections: self.rope_dimension_sections(),
         })
     }
 

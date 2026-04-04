@@ -252,8 +252,8 @@ cargo run --release --bin real_test -- /path/to/model.gguf
 ```bash
 cargo run --release --bin powerinfer-cli -- generate \
     --model /path/to/model.gguf \
-    --prompt "The capital of France is" \
-  -n 4 \
+    --prompt "Please provide a successful list of 20 prime numbers." \
+  -n 100 \
   --temperature 0.7 \
   --top-p 0.9
 ```

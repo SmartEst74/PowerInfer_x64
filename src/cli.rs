@@ -5,6 +5,23 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Resolve model path from CLI arg, env var, or error.
+fn resolve_model(model: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    if let Some(m) = model {
+        return Ok(m.clone());
+    }
+    if let Ok(env_model) = std::env::var("POWERINFER_MODEL") {
+        let p = PathBuf::from(&env_model);
+        if p.exists() {
+            return Ok(p);
+        }
+        anyhow::bail!("POWERINFER_MODEL={env_model} does not exist");
+    }
+    anyhow::bail!(
+        "No model specified. Use --model <path> or set POWERINFER_MODEL=/path/to/model.gguf"
+    );
+}
+
 #[derive(Parser)]
 #[command(name = "powerinfer")]
 #[command(about = "Neuron-level sparse LLM inference in pure Rust")]
@@ -17,9 +34,9 @@ struct Cli {
 enum Commands {
     /// Easiest path: auto-detect hardware and run with safe defaults
     Easy {
-        /// Path to GGUF model file
+        /// Path to GGUF model file (or set POWERINFER_MODEL env var)
         #[arg(short, long)]
-        model: PathBuf,
+        model: Option<PathBuf>,
 
         /// Prompt text (uses a built-in prompt if omitted)
         #[arg(short, long)]
@@ -37,16 +54,24 @@ enum Commands {
         #[arg(long, default_value_t = 0.95)]
         top_p: f32,
 
+        /// Repetition penalty (>1.0 to penalize repeats)
+        #[arg(long, default_value_t = 1.1)]
+        repetition_penalty: f32,
+
         /// Force CPU-only execution
         #[arg(long, default_value_t = false)]
         cpu_only: bool,
+
+        /// Interactive mode: keep prompting after each generation
+        #[arg(short, long, default_value_t = false)]
+        interactive: bool,
     },
 
     /// Generate text completion
     Generate {
-        /// Path to GGUF model file
+        /// Path to GGUF model file (or set POWERINFER_MODEL env var)
         #[arg(short, long)]
-        model: PathBuf,
+        model: Option<PathBuf>,
 
         /// Prompt text
         #[arg(short, long)]
@@ -108,6 +133,12 @@ enum Commands {
     },
 }
 
+/// Wrap a user prompt with Qwen3.5 / ChatML-style chat template.
+/// This is needed because instruct-tuned models expect structured input.
+fn apply_chat_template(user_message: &str) -> String {
+    format!("<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n")
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -120,62 +151,113 @@ fn main() -> anyhow::Result<()> {
             n,
             temperature,
             top_p,
+            repetition_penalty,
             cpu_only,
+            interactive,
         } => {
-            let prompt = prompt
-                .clone()
-                .unwrap_or_else(|| "The capital of France is".to_string());
+            let model = resolve_model(model)?;
+            let has_cuda_build = cfg!(feature = "cuda");
 
             eprintln!("Auto-detecting hardware...");
             let hw = powerinfer::sysinfo::HardwareProfile::sweep();
-            let has_gpus = !hw.gpus.is_empty();
-            let has_cuda_build = cfg!(feature = "cuda");
+            let n_gpus = hw.gpus.len();
 
             eprintln!("Model: {}", model.display());
             eprintln!(
                 "Detected: {} CPU cores, {} GPU(s), {:.1} GB RAM available",
                 hw.cpu.logical_cores,
-                hw.gpus.len(),
+                n_gpus,
                 hw.available_ram as f64 / (1024.0 * 1024.0 * 1024.0)
             );
 
-            let backend = if cpu_only {
-                eprintln!("Mode: CPU-only (forced)");
-                powerinfer::runtime::BackendFactory::cpu()
+            if cpu_only {
+                eprintln!("Mode: CPU-only (forced by --cpu-only)");
+            } else if has_cuda_build && n_gpus > 0 {
+                eprintln!("Mode: CUDA GPU offload ({n_gpus} GPU(s) — hot layers on GPU, cold on CPU)");
+            } else if n_gpus > 0 && !has_cuda_build {
+                eprintln!("╔═══════════════════════════════════════════════════════════╗");
+                eprintln!("║  ⚠  {n_gpus} NVIDIA GPU(s) detected but CUDA not enabled!    ║");
+                eprintln!("║  Rebuild with: cargo build --release --features cuda      ║");
+                eprintln!("║  Running CPU-only — expect 2-4× slower inference.         ║");
+                eprintln!("╚═══════════════════════════════════════════════════════════╝");
             } else {
-                if has_cuda_build && has_gpus {
-                    eprintln!("Mode: Auto (CUDA feature enabled; model will offload GPU-capable paths)");
-                } else if has_gpus {
-                    eprintln!("Mode: CPU (binary built without --features cuda)");
-                } else {
-                    eprintln!("Mode: CPU (no NVIDIA GPU detected)");
-                }
-                powerinfer::runtime::BackendFactory::cpu()
-            };
-
-            if !cpu_only && !has_cuda_build {
-                eprintln!("Tip: rebuild with --features cuda to use NVIDIA GPUs automatically");
+                eprintln!("Mode: CPU (no NVIDIA GPUs detected)");
             }
 
-            let mut ctx = powerinfer::model::InferenceContext::from_gguf(model, backend)?;
-            let (output, token_times) = ctx.generate_timed_with_options(
-                &prompt,
-                powerinfer::GenerationOptions {
+            // The backend object is always CPU — GPU offloading happens
+            // internally in InferenceContext when compiled with --features cuda.
+            let backend = powerinfer::runtime::BackendFactory::cpu();
+            let mut ctx = powerinfer::model::InferenceContext::from_gguf(&model, backend)?;
+
+            if interactive {
+                eprintln!();
+                eprintln!("Interactive mode. Type your prompt, press Enter to generate.");
+                eprintln!("Type 'quit' or Ctrl-D to exit.");
+                eprintln!();
+                loop {
+                    eprint!("You> ");
+                    let mut line = String::new();
+                    if std::io::stdin().read_line(&mut line)? == 0 {
+                        break; // EOF
+                    }
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if line == "quit" || line == "exit" {
+                        break;
+                    }
+                    let opts = powerinfer::GenerationOptions {
+                        max_tokens: n,
+                        temperature,
+                        top_p,
+                        repetition_penalty,
+                        ..powerinfer::GenerationOptions::default()
+                    };
+                    let templated = apply_chat_template(line);
+                    eprint!("AI> ");
+                    let (output, token_times) = ctx.generate_streaming(&templated, opts, |token_text| {
+                        eprint!("{token_text}");
+                    })?;
+                    let _ = output; // already printed via streaming
+                    eprintln!();
+                    if token_times.len() > 1 {
+                        let decode_times = &token_times[1..];
+                        let avg_s = decode_times.iter().sum::<f64>() / decode_times.len() as f64;
+                        let tok_s = 1.0 / avg_s;
+                        eprintln!("[{tok_s:.2} tok/s, {} tokens, {:.0}ms avg]", decode_times.len(), avg_s * 1000.0);
+                    }
+                    eprintln!();
+                }
+            } else {
+                let raw_prompt = prompt
+                    .clone()
+                    .unwrap_or_else(|| "Please provide a successful list of 20 prime numbers.".to_string());
+                let user_prompt = apply_chat_template(&raw_prompt);
+
+                let opts = powerinfer::GenerationOptions {
                     max_tokens: n,
                     temperature,
                     top_p,
+                    repetition_penalty,
                     ..powerinfer::GenerationOptions::default()
-                },
-            )?;
-            println!("{output}");
+                };
+                let (output, token_times) = ctx.generate_streaming(&user_prompt, opts, |token_text| {
+                    print!("{token_text}");
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                })?;
+                let _ = output;
+                println!();
 
-            // Show performance summary
-            if token_times.len() > 1 {
-                let decode_times = &token_times[1..];
-                let avg_s = decode_times.iter().sum::<f64>() / decode_times.len() as f64;
-                let tok_s = 1.0 / avg_s;
-                eprintln!();
-                eprintln!("Performance: {tok_s:.2} tok/s ({:.0}ms avg decode)", avg_s * 1000.0);
+                if token_times.len() > 1 {
+                    let decode_times = &token_times[1..];
+                    let avg_s = decode_times.iter().sum::<f64>() / decode_times.len() as f64;
+                    let tok_s = 1.0 / avg_s;
+                    let prefill_ms = token_times[0] * 1000.0;
+                    eprintln!();
+                    eprintln!("Performance: {tok_s:.2} tok/s | {} tokens | {:.0}ms avg decode | {:.0}ms prefill", decode_times.len(), avg_s * 1000.0, prefill_ms);
+                }
             }
         }
         Commands::Generate {
@@ -188,6 +270,7 @@ fn main() -> anyhow::Result<()> {
             top_p,
             _threads: _,
         } => {
+            let model = resolve_model(model)?;
             if let Some(prompt) = prompt {
                 eprintln!("Loading model: {model:?}");
                 let backend = if gpu_layers > 0 {
@@ -204,7 +287,7 @@ fn main() -> anyhow::Result<()> {
                     powerinfer::runtime::BackendFactory::cpu()
                 };
 
-                let mut ctx = powerinfer::model::InferenceContext::from_gguf(model, backend)?;
+                let mut ctx = powerinfer::model::InferenceContext::from_gguf(&model, backend)?;
                 if let Some(hot_index_path) = hot_index {
                     let index = powerinfer::activation::HotNeuronIndex::load(hot_index_path)?;
                     let indexed_layers = index.layers.len();

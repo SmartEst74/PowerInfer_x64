@@ -62,6 +62,8 @@ pub struct ModelConfig {
     pub quantization: QuantizationType,
     pub rms_epsilon: f32,
     pub rope_freq_base: f32,
+    /// RoPE dimension sections for IMRoPE (e.g., [11, 11, 10, 0] for Qwen3.5)
+    pub rope_sections: Option<[i32; 4]>,
 }
 
 use crate::turboquant::CompressedKVCache;
@@ -144,6 +146,7 @@ pub struct GenerationOptions {
     pub max_tokens: usize,
     pub temperature: f32,
     pub top_p: f32,
+    pub repetition_penalty: f32,
     pub seed: u64,
 }
 
@@ -162,6 +165,7 @@ impl Default for GenerationOptions {
             max_tokens: 64,
             temperature: 0.0,
             top_p: 1.0,
+            repetition_penalty: 1.1,
             seed: 0xD1CE_F00D_FEE1_DEAD,
         }
     }
@@ -185,7 +189,8 @@ impl InferenceContext {
         // Keys use TurboQuant (3-bit Lloyd-Max + 1-bit QJL = ~4 bits/coordinate) for
         // quality-neutral attention (paper: arXiv:2504.19874, 0.997 needle-in-haystack).
         // Values use f16 (2 bytes) for negligible precision loss on weighted sums.
-        let use_compressed = true;
+        // DISABLED for debugging: testing if TurboQuant compression causes output degradation
+        let use_compressed = false;
 
         let layer_caches = (0..config.block_count)
             .map(|layer_idx| {
@@ -457,6 +462,8 @@ impl InferenceContext {
         }
 
         for _ in 0..options.max_tokens {
+            // Apply repetition penalty to logits of already-generated tokens
+            apply_repetition_penalty(&mut logits, &generated, options.repetition_penalty);
             let next_token = sample_token(&logits, options.temperature, options.top_p, &mut rng);
 
             // Check for EOS
@@ -467,6 +474,57 @@ impl InferenceContext {
             generated.push(next_token);
 
             // Forward pass with just the new token
+            let t0 = std::time::Instant::now();
+            logits = self.forward(&[next_token])?;
+            token_times.push(t0.elapsed().as_secs_f64());
+        }
+
+        let output = self.tokenizer.decode(&generated);
+        Ok((output, token_times))
+    }
+
+    /// Generate text with streaming: calls `on_token` with each decoded text fragment
+    /// as soon as it's produced. Returns the full output and per-token timings.
+    pub fn generate_streaming<F>(
+        &mut self,
+        prompt: &str,
+        options: GenerationOptions,
+        mut on_token: F,
+    ) -> Result<(String, Vec<f64>)>
+    where
+        F: FnMut(&str),
+    {
+        self.reset();
+
+        let input_ids = self.tokenizer.encode(prompt);
+        if input_ids.is_empty() {
+            return Ok((String::new(), Vec::new()));
+        }
+
+        let eos_id = self.tokenizer.eos_token_id();
+        let mut generated = Vec::new();
+        let mut token_times = Vec::new();
+        let mut rng = SplitMix64::new(options.seed);
+
+        // Prefill
+        let t0 = std::time::Instant::now();
+        let mut logits = self.forward(&input_ids)?;
+        token_times.push(t0.elapsed().as_secs_f64());
+
+        for _ in 0..options.max_tokens {
+            apply_repetition_penalty(&mut logits, &generated, options.repetition_penalty);
+            let next_token = sample_token(&logits, options.temperature, options.top_p, &mut rng);
+
+            if Some(next_token) == eos_id {
+                break;
+            }
+
+            generated.push(next_token);
+
+            // Decode and stream the new token immediately
+            let text = self.tokenizer.decode(&[next_token]);
+            on_token(&text);
+
             let t0 = std::time::Instant::now();
             logits = self.forward(&[next_token])?;
             token_times.push(t0.elapsed().as_secs_f64());
@@ -495,6 +553,11 @@ impl InferenceContext {
             .min(kv_head_dim);
         let rms_eps = self.config.rms_epsilon;
         let rope_freq_base = self.config.rope_freq_base;
+
+        // Pre-compute IMRoPE frequencies if model uses sectioned RoPE
+        let imrope_freqs: Option<Vec<f32>> = self.config.rope_sections.as_ref().map(|sections| {
+            ops::compute_imrope_freqs(rope_freq_base, rope_dim, sections)
+        });
         let n_tokens = tokens.len();
         let activation_recorder = self.activation_recorder.clone();
         // Physical core count drives parallelism decisions
@@ -605,7 +668,6 @@ impl InferenceContext {
                     let n_v_h = if v_hd > 0 { value_dim / v_hd } else { 1 }; // 32
                     let k_hd = if n_v_h > 0 { key_dim / (n_v_h / 2).max(1) } else { 1 }; // 128
                     let n_k_h = if k_hd > 0 { key_dim / k_hd } else { 1 }; // 16
-                    let head_ratio = if n_k_h > 0 { n_v_h / n_k_h } else { 1 }; // 2
                     let d_conv = if conv_dim > 0 { ssm_conv1d_w.len() / conv_dim } else { 0 };
 
                     // Step 1: QKV projection
@@ -672,21 +734,18 @@ impl InferenceContext {
                         &mut a_raw, normed, ssm_alpha_t.raw(), ssm_alpha_t.qtype, n_embd, n_v_h,
                     )?;
                     // g = -exp(A_log) * softplus(a + dt_bias)
-                    // NOTE: a_raw (alpha projection output) and beta_raw are in TILED V head
-                    // order (GGUF reorders projection weights: grouped→tiled for ggml broadcast).
-                    // But ssm_a_data (A_log) and ssm_dt_bias are NOT reordered — they're in
-                    // GROUPED order. Map tiled → grouped index for these 1D params.
+                    // All SSM parameters are in TILED V head order in the GGUF:
+                    // convert_hf_to_gguf.py reorders A_log, dt_bias, alpha, beta,
+                    // QKV (V portion), gate, conv1d (V portion), and output projection
+                    // from grouped→tiled for ggml broadcast consistency.
+                    // Therefore ALL tensors use the same tiled head index directly.
                     let mut g_decay = vec![0.0f32; n_v_h];
                     for h in 0..n_v_h {
-                        // Map tiled index h to grouped index:
-                        // tiled [tile0_K0, tile0_K1, ..., tile0_K15, tile1_K0, ...]
-                        // grouped [K0_v0, K0_v1, K1_v0, K1_v1, ...]
-                        let grouped_h = (h % n_k_h) * head_ratio + h / n_k_h;
                         // ssm_a_data already stores -exp(A_log) from GGUF conversion
                         // (convert_hf_to_gguf: data_torch = -torch.exp(data_torch))
                         // Reference: g = -exp(A_log) * softplus(a + dt_bias) = ssm_a * softplus(...)
-                        let ssm_a = ssm_a_data[grouped_h]; // already = -exp(A_log)
-                        let sp_in = a_raw[h] + ssm_dt_bias[grouped_h];
+                        let ssm_a = ssm_a_data[h]; // already = -exp(A_log), tiled order
+                        let sp_in = a_raw[h] + ssm_dt_bias[h];
                         let sp = if sp_in > 10.0 { sp_in } else { (1.0_f32 + sp_in.exp()).ln() };
                         g_decay[h] = ssm_a * sp; // negative × positive → negative → exp(g) < 1
                     }
@@ -707,7 +766,8 @@ impl InferenceContext {
 
                     // Step 7: L2-normalize Q and K per head, then scale Q
                     // Reference: fla-org fused_recurrent_gated_delta_rule kernel
-                    // Q and K are L2-normalized (use_qk_l2norm_in_kernel=True),
+                    // Q and K are L2-normalized (ggml_l2_norm in llama.cpp):
+                    //   y[i] = x[i] / max(sqrt(sum(x^2)), eps)
                     // then Q is scaled by 1/sqrt(k_hd) for attention scaling.
                     let q_scale = 1.0 / (k_hd as f32).sqrt();
                     for vh in 0..n_v_h {
@@ -825,8 +885,6 @@ impl InferenceContext {
                         crate::quant::matvec_col_major(&mut v, normed, wv_t.raw(), wv_t.qtype, n_embd, actual_v_total)?;
                     }
 
-
-
                     // De-interleave Q and gate: each head stores [q_head_dim Q, q_head_dim gate]
                     let mut q = vec![0.0f32; q_total];
                     let mut output_gate = vec![0.0f32; q_total];
@@ -859,27 +917,59 @@ impl InferenceContext {
                     }
 
                     // Apply RoPE to Q (first actual_kv_head_dim dims of each head) and K
-                    let abs_pos = prev_seq_len + pos;
                     // RoPE rotation dim: capped to actual_kv_head_dim for this layer
                     let attn_rope_dim = rope_dim.min(actual_kv_head_dim);
+
+                    // Compute per-head RoPE frequencies for this layer.
+                    // Use IMROPE (NeoX pairing) if model has rope_sections, else standard.
+                    let attn_freqs: Option<Vec<f32>> = imrope_freqs.as_ref().map(|f| {
+                        // IMROPE freqs cover rope_dim/2 pairs; cap to attn_rope_dim/2
+                        f[..attn_rope_dim / 2].to_vec()
+                    });
+
+                    // Apply RoPE to each Q head and each K head exactly once.
+                    // K has fewer heads (n_kv_heads) than Q (n_heads), so we
+                    // must not re-rotate K heads when multiple Q heads share one K head.
+                    let abs_pos = prev_seq_len + pos;
                     for h in 0..n_heads {
                         let q_off = h * q_head_dim;
-                        // Only rotate the first actual_kv_head_dim elements of Q (the attention query)
                         let mut q_head = q[q_off..q_off + actual_kv_head_dim].to_vec();
-                        // K head (only at this position's KV head)
                         let kv_h = h % n_kv_heads;
                         let k_off = kv_h * actual_kv_head_dim;
-                        let mut k_head = k[k_off..k_off + actual_kv_head_dim].to_vec();
-                        ops::apply_rope(
-                            &mut q_head,
-                            &mut k_head,
-                            abs_pos,
-                            actual_kv_head_dim,
-                            attn_rope_dim,
-                            rope_freq_base,
-                        );
+
+                        if h < n_kv_heads {
+                            // First time seeing this K head — rotate both Q and K
+                            let mut k_head = k[k_off..k_off + actual_kv_head_dim].to_vec();
+                            if let Some(ref freqs) = attn_freqs {
+                                ops::apply_rope_with_freqs(
+                                    &mut q_head, &mut k_head,
+                                    abs_pos, actual_kv_head_dim, freqs,
+                                );
+                            } else {
+                                ops::apply_rope(
+                                    &mut q_head, &mut k_head,
+                                    abs_pos, actual_kv_head_dim,
+                                    attn_rope_dim, rope_freq_base,
+                                );
+                            }
+                            k[k_off..k_off + actual_kv_head_dim].copy_from_slice(&k_head);
+                        } else {
+                            // K head already rotated — only rotate Q, use dummy for K
+                            let mut dummy_k = vec![0.0f32; actual_kv_head_dim];
+                            if let Some(ref freqs) = attn_freqs {
+                                ops::apply_rope_with_freqs(
+                                    &mut q_head, &mut dummy_k,
+                                    abs_pos, actual_kv_head_dim, freqs,
+                                );
+                            } else {
+                                ops::apply_rope(
+                                    &mut q_head, &mut dummy_k,
+                                    abs_pos, actual_kv_head_dim,
+                                    attn_rope_dim, rope_freq_base,
+                                );
+                            }
+                        }
                         q[q_off..q_off + actual_kv_head_dim].copy_from_slice(&q_head);
-                        k[k_off..k_off + actual_kv_head_dim].copy_from_slice(&k_head);
                     }
 
                     // Append K, V to KV cache (f16 compressed or f32)
@@ -969,6 +1059,7 @@ impl InferenceContext {
             for pos in 0..n_tokens {
                 let pos_offset = pos * n_embd;
                 let lo = &scratch_layer_out[pos_offset..pos_offset + n_embd];
+
                 scratch_normed.fill(0.0);
                 ops::rms_norm(&mut scratch_normed, lo, &ffn_norm_w, rms_eps);
                 let normed = &scratch_normed[..];
@@ -1287,10 +1378,15 @@ impl InferenceContext {
 
             std::mem::swap(&mut x, &mut scratch_layer_out);
 
-            // Per-layer timing (only for single-token decode steps)
-            if n_tokens == 1 && diagnostics_enabled() {
+            // Per-layer diagnostics
+            if diagnostics_enabled() {
+                let last_off = (n_tokens - 1) * n_embd;
+                let h = &x[last_off..last_off + n_embd];
+                let norm: f32 = h.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let max_abs: f32 = h.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+                let layer_type = if is_ssm { "SSM" } else { "ATN" };
                 let layer_ms = layer_start.elapsed().as_secs_f64() * 1000.0;
-                eprintln!("[TIMING] layer {layer_idx}: {layer_ms:.1}ms");
+                eprintln!("[LAYER {layer_idx:>2}] {layer_type} norm={norm:.2} max={max_abs:.4} time={layer_ms:.1}ms");
             }
         }
 
@@ -1512,6 +1608,19 @@ impl InferenceContext {
         }
     }
 
+    /// Return (layer_idx, frobenius_norm) for each SSM layer's state
+    pub fn ssm_state_norms(&self) -> Vec<(usize, f32)> {
+        self.ssm_states
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(i, s)| {
+                let norm: f32 = s.iter().map(|x| x * x).sum::<f32>().sqrt();
+                (i, norm)
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn record_dense_ffn_activations(
         &self,
@@ -1555,6 +1664,25 @@ fn sample_argmax(logits: &[f32]) -> u32 {
         }
     }
     best_id
+}
+
+/// Apply repetition penalty to logits for tokens that have already been generated.
+/// Penalty > 1.0 reduces the probability of repeating; 1.0 = no effect.
+/// Uses the standard approach: divide positive logits by penalty, multiply negative ones.
+fn apply_repetition_penalty(logits: &mut [f32], generated: &[u32], penalty: f32) {
+    if penalty <= 1.0 || !penalty.is_finite() {
+        return;
+    }
+    for &token_id in generated {
+        let idx = token_id as usize;
+        if idx < logits.len() {
+            if logits[idx] > 0.0 {
+                logits[idx] /= penalty;
+            } else {
+                logits[idx] *= penalty;
+            }
+        }
+    }
 }
 
 fn sample_token(logits: &[f32], temperature: f32, top_p: f32, rng: &mut SplitMix64) -> u32 {
