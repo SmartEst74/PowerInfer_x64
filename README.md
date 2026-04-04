@@ -249,13 +249,26 @@ cargo run --release --bin real_test -- /path/to/model.gguf
 
 ### Generate Text
 
+The most reliable demonstration: provide the first 19 primes and let the model
+identify the 20th (71).  The complete list of all 20 primes appears in the
+output (prompt + generated):
+
 ```bash
 cargo run --release --bin powerinfer-cli -- generate \
     --model /path/to/model.gguf \
-    --prompt "Please provide a successful list of 20 prime numbers." \
-  -n 100 \
-  --temperature 0.7 \
-  --top-p 0.9
+    --prompt "2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67," \
+    -n 4 --temperature 0
+# Output: 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71,
+```
+
+For interactive chat use the `easy` subcommand (applies chat template
+automatically):
+
+```bash
+cargo run --release --bin powerinfer-cli -- easy \
+    --model /path/to/model.gguf \
+    --prompt "What is the 20th prime number?" \
+    -n 200 --temperature 0
 ```
 
 For most users, prefer `easy` over `generate`.

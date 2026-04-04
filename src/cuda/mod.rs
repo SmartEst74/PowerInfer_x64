@@ -139,7 +139,9 @@ EXIT:
     /// uploaded via [`GpuDevice::upload_f32`] and kept resident until the
     /// device is dropped.
     pub struct GpuDevice {
-        ctx: Context,
+        // IMPORTANT: field declaration order = drop order in Rust.
+        // stream and scratch must drop BEFORE ctx (which calls cuDevicePrimaryCtxRelease
+        // and resets the context, invalidating all associated resources).
         stream: Stream,
         matvec_func: Function<'static>,
         // Keep module alive so the function pointer stays valid.
@@ -148,6 +150,11 @@ EXIT:
         /// Reusable scratch buffers to avoid per-call CUDA alloc/free.
         /// (d_x capacity in f32 elements, d_x buffer, d_y capacity in f32 elements, d_y buffer)
         scratch: RefCell<Option<ScratchBuffers>>,
+        // MUST be declared last: Context::drop calls cuDevicePrimaryCtxRelease which
+        // resets the primary context and frees all associated resources (streams, buffers)
+        // before cust can call their individual CUDA destructors.  Declaring ctx last
+        // ensures stream and scratch are freed first while the context is still alive.
+        ctx: Context,
     }
 
     // SAFETY: GpuDevice holds CUDA resources that are bound to the creating thread's
@@ -155,6 +162,20 @@ EXIT:
     // impls are required because InferenceContext (which owns GpuDevice) is Send.
     unsafe impl Send for GpuDevice {}
     unsafe impl Sync for GpuDevice {}
+
+    impl Drop for GpuDevice {
+        fn drop(&mut self) {
+            // Make this device's context current BEFORE the struct fields drop.
+            // cuStreamDestroy and cuMemFree (called by Stream::drop and
+            // DeviceBuffer::drop) require the owning context to be current.
+            // Context::drop calls cuDevicePrimaryCtxRelease which resets the
+            // primary context when refcount hits 0, invalidating all associated
+            // resources; therefore ctx is declared last (drops last) while this
+            // explicit make_current() ensures the context is active for the earlier
+            // field drops (stream, scratch).
+            let _ = self.make_current();
+        }
+    }
 
     /// Handle to a contiguous f32 buffer in GPU VRAM.
     pub struct GpuBuffer {
@@ -187,12 +208,12 @@ EXIT:
                 .map_err(|e| format!("get_function: {e}"))?;
 
             Ok(Self {
-                ctx,
                 stream,
                 matvec_func,
                 _module: module,
                 device_id,
                 scratch: RefCell::new(None),
+                ctx,
             })
         }
 
@@ -503,13 +524,15 @@ EXIT:
         fn drop(&mut self) {
             // Ensure each GPU context is current before its resources are freed.
             // Without this, the CUDA driver segfaults at process exit because
-            // DeviceBuffers try to cuMemFree on a stale context.
-            // Drop layer weights and LM head first (they hold DeviceBuffers).
+            // cuMemFree must be called while the owning context is current.
+
+            // 1. Drop layer weights (GpuBuffer → cuMemFree) per-device.
             for (_, lw) in self.layers.drain() {
                 let dev = &self.devices[lw.device_idx];
                 let _ = dev.make_current();
                 drop(lw.buffers);
             }
+            // 2. Drop LM head parts per-device.
             if let Some(parts) = self.lm_head.take() {
                 for part in parts {
                     let dev = &self.devices[part.device_idx];
@@ -517,11 +540,18 @@ EXIT:
                     drop(part.buffer);
                 }
             }
-            // Now drop devices in reverse order (stream, then context).
-            for dev in self.devices.iter() {
+            // 3. Explicitly free each device's scratch buffers while that device's
+            //    context is current.  This must happen BEFORE the Vec<GpuDevice>
+            //    drops below, because the Vec drops in forward order and does NOT
+            //    set the owning context current before each device's allocations
+            //    are freed — causing cuMemFree on the wrong context → SIGSEGV.
+            for dev in &self.devices {
                 let _ = dev.make_current();
-                // scratch buffers freed here when GpuDevice drops
+                // Drop CUDA scratch buffers (d_x, d_y) while this device is current.
+                dev.scratch.borrow_mut().take();
             }
+            // 4. self.devices drops here; each GpuDevice's stream/context clean up.
+            //    No more VRAM allocations remain at this point.
         }
     }
 }

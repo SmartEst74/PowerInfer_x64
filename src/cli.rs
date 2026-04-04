@@ -43,7 +43,7 @@ enum Commands {
         prompt: Option<String>,
 
         /// Number of tokens to generate
-        #[arg(short, long, default_value = "64")]
+        #[arg(short, long, default_value = "200")]
         n: usize,
 
         /// Temperature for sampling
@@ -134,9 +134,17 @@ enum Commands {
 }
 
 /// Wrap a user prompt with Qwen3.5 / ChatML-style chat template.
-/// This is needed because instruct-tuned models expect structured input.
+///
+/// The pre-filled `<think>\n\n</think>` block immediately after the assistant
+/// marker is the Qwen3 no-think suppression: tokens 248068 (`<think>`) and
+/// 248069 (`</think>`) are single special tokens in this tokenizer, so the
+/// model sees a *closed* thinking block and proceeds directly to the answer.
+/// This reliably prevents the long chain-of-thought loops that degenerate
+/// at the token budgets we use.
 fn apply_chat_template(user_message: &str) -> String {
-    format!("<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n")
+    format!(
+        "<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n"
+    )
 }
 
 fn main() -> anyhow::Result<()> {
@@ -232,7 +240,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 let raw_prompt = prompt
                     .clone()
-                    .unwrap_or_else(|| "Please provide a successful list of 20 prime numbers.".to_string());
+                    .unwrap_or_else(|| "What is the 20th prime number?".to_string());
                 let user_prompt = apply_chat_template(&raw_prompt);
 
                 let opts = powerinfer::GenerationOptions {
