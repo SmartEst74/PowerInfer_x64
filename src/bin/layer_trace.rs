@@ -1,15 +1,20 @@
 /// Layer-by-layer debug: dump hidden state at each step for token 727
 use powerinfer::model::InferenceContext;
-use powerinfer::runtime::BackendFactory;
 use powerinfer::ops;
+use powerinfer::runtime::BackendFactory;
 
 fn norm_and_stats(label: &str, v: &[f32]) {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     let min = v.iter().cloned().fold(f32::INFINITY, f32::min);
     let max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    println!("  {label}: len={} norm={norm:.6} min={min:.6} max={max:.6}", v.len());
+    println!(
+        "  {label}: len={} norm={norm:.6} min={min:.6} max={max:.6}",
+        v.len()
+    );
     print!("    first 8:");
-    for x in v.iter().take(8) { print!(" {x:.6}"); }
+    for x in v.iter().take(8) {
+        print!(" {x:.6}");
+    }
     println!();
 }
 
@@ -41,11 +46,16 @@ fn main() -> anyhow::Result<()> {
     let conv_dim = inproj_t.shape.get(1).copied().unwrap_or(0);
     let mut qkv = vec![0.0f32; conv_dim];
     powerinfer::quant::matvec_col_major(
-        &mut qkv, &normed, inproj_t.raw(), inproj_t.qtype, n_embd, conv_dim,
+        &mut qkv,
+        &normed,
+        inproj_t.raw(),
+        inproj_t.qtype,
+        n_embd,
+        conv_dim,
     )?;
     println!("\n=== Layer 0: after QKV projection (before conv) ===");
     norm_and_stats("qkv", &qkv);
-    
+
     // Step 4: Conv1d (first token — conv state is zeros except last slot)
     let ssm_conv1d_w = weights.get_data("blk.0.ssm_conv1d.weight")?;
     let d_conv = 4;
@@ -59,13 +69,13 @@ fn main() -> anyhow::Result<()> {
     }
     println!("\n=== Layer 0: after Conv1d+SiLU ===");
     norm_and_stats("qkv_conv", &qkv_conv);
-    
+
     // Step 5: Split Q, K, V
     let ssm_out_t = weights.get("blk.0.ssm_out.weight").unwrap();
     let value_dim = ssm_out_t.shape.first().copied().unwrap_or(0);
     let key_dim = (conv_dim - value_dim) / 2;
     println!("\n  key_dim={key_dim} value_dim={value_dim} conv_dim={conv_dim}");
-    
+
     let q_raw = &qkv_conv[..key_dim];
     let k_raw = &qkv_conv[key_dim..key_dim * 2];
     let v_raw = &qkv_conv[key_dim * 2..];
@@ -77,7 +87,12 @@ fn main() -> anyhow::Result<()> {
     let gate_t = weights.get("blk.0.attn_gate.weight").unwrap();
     let mut z = vec![0.0f32; value_dim];
     powerinfer::quant::matvec_col_major(
-        &mut z, &normed, gate_t.raw(), gate_t.qtype, n_embd, value_dim,
+        &mut z,
+        &normed,
+        gate_t.raw(),
+        gate_t.qtype,
+        n_embd,
+        value_dim,
     )?;
     norm_and_stats("Z gate", &z);
 
@@ -87,22 +102,38 @@ fn main() -> anyhow::Result<()> {
     let ssm_norm_w = weights.get_data("blk.0.ssm_norm.weight")?;
     let v_hd = ssm_norm_w.len();
     let n_v_h = if v_hd > 0 { value_dim / v_hd } else { 1 };
-    let k_hd = if n_v_h > 0 { key_dim / (n_v_h / 2).max(1) } else { 1 };
+    let k_hd = if n_v_h > 0 {
+        key_dim / (n_v_h / 2).max(1)
+    } else {
+        1
+    };
     let n_k_h = if k_hd > 0 { key_dim / k_hd } else { 1 };
     println!("\n  v_hd={v_hd} n_v_h={n_v_h} k_hd={k_hd} n_k_h={n_k_h}");
 
     let mut beta_raw = vec![0.0f32; n_v_h];
     powerinfer::quant::matvec_col_major(
-        &mut beta_raw, &normed, ssm_beta_t.raw(), ssm_beta_t.qtype, n_embd, n_v_h,
+        &mut beta_raw,
+        &normed,
+        ssm_beta_t.raw(),
+        ssm_beta_t.qtype,
+        n_embd,
+        n_v_h,
     )?;
     let mut beta = beta_raw.clone();
-    for b in beta.iter_mut() { *b = 1.0 / (1.0 + (-*b).exp()); }
+    for b in beta.iter_mut() {
+        *b = 1.0 / (1.0 + (-*b).exp());
+    }
     println!("\n");
     norm_and_stats("beta (sigmoid)", &beta);
 
     let mut a_raw = vec![0.0f32; n_v_h];
     powerinfer::quant::matvec_col_major(
-        &mut a_raw, &normed, ssm_alpha_t.raw(), ssm_alpha_t.qtype, n_embd, n_v_h,
+        &mut a_raw,
+        &normed,
+        ssm_alpha_t.raw(),
+        ssm_alpha_t.qtype,
+        n_embd,
+        n_v_h,
     )?;
     let ssm_a_data = weights.get_data("blk.0.ssm_a")?;
     let ssm_dt_bias = weights.get_data("blk.0.ssm_dt.bias")?;
@@ -110,7 +141,11 @@ fn main() -> anyhow::Result<()> {
     for h in 0..n_v_h {
         let ssm_a = ssm_a_data[h];
         let sp_in = a_raw[h] + ssm_dt_bias[h];
-        let sp = if sp_in > 10.0 { sp_in } else { (1.0_f32 + sp_in.exp()).ln() };
+        let sp = if sp_in > 10.0 {
+            sp_in
+        } else {
+            (1.0_f32 + sp_in.exp()).ln()
+        };
         g_decay[h] = ssm_a * sp;
     }
     norm_and_stats("g_decay", &g_decay);
@@ -125,19 +160,23 @@ fn main() -> anyhow::Result<()> {
         q_exp[dst..dst + k_hd].copy_from_slice(&q_raw[src..src + k_hd]);
         k_exp[dst..dst + k_hd].copy_from_slice(&k_raw[src..src + k_hd]);
     }
-    
+
     // L2 normalize
     let q_scale = 1.0 / (k_hd as f32).sqrt();
     for vh in 0..n_v_h {
         let off = vh * k_hd;
         let q_slice = &mut q_exp[off..off + k_hd];
         let norm_q: f32 = q_slice.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
-        for x in q_slice.iter_mut() { *x = *x / norm_q * q_scale; }
+        for x in q_slice.iter_mut() {
+            *x = *x / norm_q * q_scale;
+        }
         let k_slice = &mut k_exp[off..off + k_hd];
         let norm_k: f32 = k_slice.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
-        for x in k_slice.iter_mut() { *x /= norm_k; }
+        for x in k_slice.iter_mut() {
+            *x /= norm_k;
+        }
     }
-    
+
     // Step 9: Delta rule (state starts at 0)
     // For first token with zero state: out[v] = beta * (Q·K) * V[v]
     let mut attn_result = vec![0.0f32; value_dim];
@@ -146,7 +185,7 @@ fn main() -> anyhow::Result<()> {
         let q_h = &q_exp[vh * k_hd..(vh + 1) * k_hd];
         let k_h = &k_exp[vh * k_hd..(vh + 1) * k_hd];
         let v_h = &v_raw[vh * v_hd..(vh + 1) * v_hd];
-        
+
         // State = 0, so:
         // S[k,v] = K[k] * V[v] * beta
         // out[v] = sum_k S[k,v] * Q[k] = beta * V[v] * (Q·K)
@@ -178,14 +217,21 @@ fn main() -> anyhow::Result<()> {
     // Step 11: Output projection
     let mut out = vec![0.0f32; n_embd];
     powerinfer::quant::matvec_col_major(
-        &mut out, &attn_result, ssm_out_t.raw(), ssm_out_t.qtype, value_dim, n_embd,
+        &mut out,
+        &attn_result,
+        ssm_out_t.raw(),
+        ssm_out_t.qtype,
+        value_dim,
+        n_embd,
     )?;
     println!("\n=== Layer 0: output projection ===");
     norm_and_stats("out_proj", &out);
 
     // Step 12: Residual
     let mut h_out = h.clone();
-    for (ho, o) in h_out.iter_mut().zip(out.iter()) { *ho += o; }
+    for (ho, o) in h_out.iter_mut().zip(out.iter()) {
+        *ho += o;
+    }
     println!("\n=== Layer 0: after residual (h + attn_out) ===");
     norm_and_stats("h_resid", &h_out);
 

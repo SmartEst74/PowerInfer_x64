@@ -13,8 +13,14 @@ fn main() -> anyhow::Result<()> {
         ("5-tok", "The capital of France is"),
         ("7-tok", "def fibonacci(n):\n    if"),
         ("10-tok", "def fibonacci(n):\n    if n <= 1"),
-        ("13-tok", "def fibonacci(n):\n    if n <= 1:\n        return"),
-        ("19-tok", "def fibonacci(n):\n    if n <= 1:\n        return n\n    return"),
+        (
+            "13-tok",
+            "def fibonacci(n):\n    if n <= 1:\n        return",
+        ),
+        (
+            "19-tok",
+            "def fibonacci(n):\n    if n <= 1:\n        return n\n    return",
+        ),
     ];
 
     for (label, prompt) in &tests {
@@ -29,6 +35,6 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  token={id:>6} logit={logit:>8.4} text={text:?}");
         }
     }
-    
+
     Ok(())
 }

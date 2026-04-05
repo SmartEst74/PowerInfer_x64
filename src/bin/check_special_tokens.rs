@@ -31,11 +31,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn test_generate(
-    ctx: &mut InferenceContext,
-    prompt: &str,
-    n_tokens: usize,
-) -> anyhow::Result<()> {
+fn test_generate(ctx: &mut InferenceContext, prompt: &str, n_tokens: usize) -> anyhow::Result<()> {
     let input_ids = ctx.tokenizer().encode(prompt);
     println!("Prompt: {:?} ({} tokens)", prompt, input_ids.len());
 
@@ -57,11 +53,7 @@ fn test_generate(
                 )
             })
             .collect();
-        println!(
-            "  Step {step}: {:?} | top5: {}",
-            top_text,
-            top5.join(", ")
-        );
+        println!("  Step {step}: {:?} | top5: {}", top_text, top5.join(", "));
 
         if Some(top_id) == ctx.tokenizer().eos_token_id() {
             break;

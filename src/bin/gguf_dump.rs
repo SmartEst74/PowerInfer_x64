@@ -95,11 +95,15 @@ fn main() -> anyhow::Result<()> {
     let tensors = gguf.tensors();
     for layer in [0, 1, 4, 8, 12, 20, 39] {
         let prefix = format!("blk.{layer}.");
-        let layer_tensors: Vec<_> = tensors.iter()
+        let layer_tensors: Vec<_> = tensors
+            .iter()
             .filter(|t| t.name.starts_with(&prefix))
             .collect();
-        if layer_tensors.is_empty() { continue; }
-        let names: Vec<String> = layer_tensors.iter()
+        if layer_tensors.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = layer_tensors
+            .iter()
             .map(|t| {
                 let short = t.name.strip_prefix(&prefix).unwrap_or(&t.name);
                 let shape: Vec<String> = t.shape.iter().map(|d| d.to_string()).collect();

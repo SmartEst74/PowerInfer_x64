@@ -8,9 +8,15 @@ fn main() -> anyhow::Result<()> {
     let mut ctx = InferenceContext::from_gguf(model_path, backend)?;
 
     // llama.cpp's tokenization of the fibonacci prompt
-    let llamacpp_tokens: Vec<u32> = vec![727, 73111, 1393, 1590, 198, 262, 413, 307, 2564, 220, 16, 25, 198, 285, 460, 307, 198, 262, 460];
+    let llamacpp_tokens: Vec<u32> = vec![
+        727, 73111, 1393, 1590, 198, 262, 413, 307, 2564, 220, 16, 25, 198, 285, 460, 307, 198,
+        262, 460,
+    ];
     // Our tokenization
-    let our_tokens: Vec<u32> = vec![727, 73111, 1393, 1590, 198, 257, 331, 307, 2564, 220, 16, 25, 198, 260, 671, 307, 198, 257, 671];
+    let our_tokens: Vec<u32> = vec![
+        727, 73111, 1393, 1590, 198, 257, 331, 307, 2564, 220, 16, 25, 198, 260, 671, 307, 198,
+        257, 671,
+    ];
 
     // Show what each token decodes to
     eprintln!("=== Token comparison ===");

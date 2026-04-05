@@ -88,7 +88,10 @@ fn integration_compressed_kv_attention() {
     assert_eq!(cache.seq_len(), 50);
     // TurboQuant 3-bit keys + f16 values: compression > 2x
     let ratio = cache.compression_ratio();
-    assert!(ratio > 2.0, "Expected > 2.0x compression with TurboQuant, got {ratio}");
+    assert!(
+        ratio > 2.0,
+        "Expected > 2.0x compression with TurboQuant, got {ratio}"
+    );
 
     // Compute attention scores
     let q: Vec<f32> = (0..head_dim).map(|i| (i as f32 * 0.1).sin()).collect();

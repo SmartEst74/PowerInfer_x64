@@ -8,9 +8,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use powerinfer::activation::{
-    default_profile_prompts,
-    load_prompts_from_files,
-    run_activation_profiling,
+    default_profile_prompts, load_prompts_from_files, run_activation_profiling,
 };
 use powerinfer::runtime::BackendFactory;
 
@@ -71,10 +69,8 @@ fn main() -> anyhow::Result<()> {
         eprintln!("No prompt sources provided; using built-in smoke prompts.");
     }
 
-    let mut ctx = powerinfer::model::InferenceContext::from_gguf(
-        &cli.model,
-        BackendFactory::cpu(),
-    )?;
+    let mut ctx =
+        powerinfer::model::InferenceContext::from_gguf(&cli.model, BackendFactory::cpu())?;
 
     eprintln!("Model loaded in {:.1}s", start.elapsed().as_secs_f32());
     eprintln!("Architecture: {}", ctx.config().arch);

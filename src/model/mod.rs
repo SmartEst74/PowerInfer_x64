@@ -196,7 +196,8 @@ impl InferenceContext {
             .map(|layer_idx| {
                 // Full attention layers may have different kv_head_dim than GDR layers.
                 // Derive from attn_k tensor shape if available.
-                let layer_kv_dim = weights.get(&format!("blk.{layer_idx}.attn_k.weight"))
+                let layer_kv_dim = weights
+                    .get(&format!("blk.{layer_idx}.attn_k.weight"))
                     .and_then(|t| t.shape.get(1).copied())
                     .map(|total| total / n_kv_heads.max(1))
                     .unwrap_or(kv_head_dim);
@@ -231,11 +232,20 @@ impl InferenceContext {
         {
             let mut prefetch_names = Vec::new();
             let suffixes = [
-                "attn_qkv", "attn_gate", "ssm_out",
-                "attn_q", "attn_k", "attn_v", "attn_output",
-                "attn_norm", "ffn_norm", "post_attention_norm",
+                "attn_qkv",
+                "attn_gate",
+                "ssm_out",
+                "attn_q",
+                "attn_k",
+                "attn_v",
+                "attn_output",
+                "attn_norm",
+                "ffn_norm",
+                "post_attention_norm",
                 // MoE shared expert (always active — critical for page cache)
-                "ffn_gate_shexp", "ffn_up_shexp", "ffn_down_shexp",
+                "ffn_gate_shexp",
+                "ffn_up_shexp",
+                "ffn_down_shexp",
                 // MoE router
                 "ffn_gate_inp",
             ];
@@ -248,20 +258,32 @@ impl InferenceContext {
             prefetch_names.push("output.weight".into());
             prefetch_names.push("output_norm.weight".into());
             weights.prefetch(&prefetch_names);
-            eprintln!("[mmap] Prefetching {} weight regions into page cache", prefetch_names.len());
+            eprintln!(
+                "[mmap] Prefetching {} weight regions into page cache",
+                prefetch_names.len()
+            );
 
             // mlock shared expert + router weights to prevent eviction.
             // These are accessed every token on every layer — ~131 MB total.
             let mut mlock_names = Vec::new();
             for i in 0..config.block_count {
-                for s in &["ffn_gate_shexp", "ffn_up_shexp", "ffn_down_shexp", "ffn_gate_inp", "ffn_gate_inp_shexp"] {
+                for s in &[
+                    "ffn_gate_shexp",
+                    "ffn_up_shexp",
+                    "ffn_down_shexp",
+                    "ffn_gate_inp",
+                    "ffn_gate_inp_shexp",
+                ] {
                     mlock_names.push(format!("blk.{i}.{s}.weight"));
                 }
             }
             mlock_names.push("output_norm.weight".into());
             let locked = weights.mlock(&mlock_names);
             if locked > 0 {
-                eprintln!("[mmap] Locked {:.1} MB of shared expert/router weights in RAM", locked as f64 / 1e6);
+                eprintln!(
+                    "[mmap] Locked {:.1} MB of shared expert/router weights in RAM",
+                    locked as f64 / 1e6
+                );
             }
         }
 
@@ -364,20 +386,21 @@ impl InferenceContext {
                     ) {
                         Ok(mut res) => {
                             // Upload LM head to GPU (split across GPUs)
-                            let lm_tensor = weights.get("output.weight")
+                            let lm_tensor = weights
+                                .get("output.weight")
                                 .or_else(|| weights.get("token_embd.weight"));
                             if let Some(lm_t) = lm_tensor {
                                 let n_in = lm_t.shape.first().copied().unwrap_or(0);
                                 let n_out = lm_t.shape.get(1).copied().unwrap_or(0);
                                 if let Ok(data) = lm_t.to_f32() {
                                     match res.upload_lm_head(&data, n_out, n_in) {
-                                        Ok(()) => {},
+                                        Ok(()) => {}
                                         Err(e) => eprintln!("[GPU] LM head upload failed: {e}"),
                                     }
                                 }
                             }
                             Some(res)
-                        },
+                        }
                         Err(e) => {
                             eprintln!("[GPU] Failed to initialize GPU resources: {e}");
                             None
@@ -408,19 +431,28 @@ impl InferenceContext {
 
     /// Generate text given a prompt
     pub fn generate(&mut self, prompt: &str, max_tokens: usize) -> Result<String> {
-        let (output, _) = self.generate_timed_with_options(prompt, GenerationOptions::greedy(max_tokens))?;
+        let (output, _) =
+            self.generate_timed_with_options(prompt, GenerationOptions::greedy(max_tokens))?;
         Ok(output)
     }
 
     /// Generate text with sampling options.
-    pub fn generate_with_options(&mut self, prompt: &str, options: GenerationOptions) -> Result<String> {
+    pub fn generate_with_options(
+        &mut self,
+        prompt: &str,
+        options: GenerationOptions,
+    ) -> Result<String> {
         let (output, _) = self.generate_timed_with_options(prompt, options)?;
         Ok(output)
     }
 
     /// Generate text and return per-token timing (seconds per token).
     /// First entry is prefill time, remaining are decode times.
-    pub fn generate_timed(&mut self, prompt: &str, max_tokens: usize) -> Result<(String, Vec<f64>)> {
+    pub fn generate_timed(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+    ) -> Result<(String, Vec<f64>)> {
         self.generate_timed_with_options(prompt, GenerationOptions::greedy(max_tokens))
     }
 
@@ -548,20 +580,28 @@ impl InferenceContext {
         let kv_head_dim = self.config.attention.kv_head_dim();
         let v_head_dim = self.config.attention.v_head_dim();
         // RoPE: only rotate first rope_dim dims of each head (capped to kv_head_dim)
-        let rope_dim = self.config.attention.rope_dim
+        let rope_dim = self
+            .config
+            .attention
+            .rope_dim
             .unwrap_or(kv_head_dim)
             .min(kv_head_dim);
         let rms_eps = self.config.rms_epsilon;
         let rope_freq_base = self.config.rope_freq_base;
 
         // Pre-compute IMRoPE frequencies if model uses sectioned RoPE
-        let imrope_freqs: Option<Vec<f32>> = self.config.rope_sections.as_ref().map(|sections| {
-            ops::compute_imrope_freqs(rope_freq_base, rope_dim, sections)
-        });
+        let imrope_freqs: Option<Vec<f32>> = self
+            .config
+            .rope_sections
+            .as_ref()
+            .map(|sections| ops::compute_imrope_freqs(rope_freq_base, rope_dim, sections));
         let n_tokens = tokens.len();
         let activation_recorder = self.activation_recorder.clone();
         // Physical core count drives parallelism decisions
-        let cpu_cores = self.hw_profile.as_ref().map_or(2, |hw| hw.cpu.physical_cores.max(1));
+        let cpu_cores = self
+            .hw_profile
+            .as_ref()
+            .map_or(2, |hw| hw.cpu.physical_cores.max(1));
 
         // GPU dispatch: try GPU matvec first, fall back to CPU if not a GPU layer.
         // The macro returns true if GPU handled the matvec, false otherwise.
@@ -616,7 +656,9 @@ impl InferenceContext {
             let is_ssm = self.weights.has(&format!("{prefix}.ssm_a"));
 
             // Pre-attention RMSNorm weight
-            let attn_norm_w = self.weights.get_data(&format!("{prefix}.attn_norm.weight"))?;
+            let attn_norm_w = self
+                .weights
+                .get_data(&format!("{prefix}.attn_norm.weight"))?;
 
             let cache = &mut self.layer_caches[layer_idx];
             let prev_seq_len = cache.seq_len(kv_head_dim, n_kv_heads);
@@ -645,20 +687,34 @@ impl InferenceContext {
                     //   ssm_norm [v_head_dim] = [128]  (RMSNormGated weight)
                     //   ssm_out [value_dim, n_embd] = [4096, 2048]  (output projection)
 
-                    let inproj_t = self.weights.get(&format!("{prefix}.attn_qkv.weight"))
+                    let inproj_t = self
+                        .weights
+                        .get(&format!("{prefix}.attn_qkv.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.attn_qkv.weight not found"))?;
-                    let gate_t = self.weights.get(&format!("{prefix}.attn_gate.weight"))
+                    let gate_t = self
+                        .weights
+                        .get(&format!("{prefix}.attn_gate.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.attn_gate.weight not found"))?;
-                    let ssm_alpha_t = self.weights.get(&format!("{prefix}.ssm_alpha.weight"))
+                    let ssm_alpha_t = self
+                        .weights
+                        .get(&format!("{prefix}.ssm_alpha.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.ssm_alpha.weight not found"))?;
-                    let ssm_beta_t = self.weights.get(&format!("{prefix}.ssm_beta.weight"))
+                    let ssm_beta_t = self
+                        .weights
+                        .get(&format!("{prefix}.ssm_beta.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.ssm_beta.weight not found"))?;
-                    let ssm_out_t = self.weights.get(&format!("{prefix}.ssm_out.weight"))
+                    let ssm_out_t = self
+                        .weights
+                        .get(&format!("{prefix}.ssm_out.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.ssm_out.weight not found"))?;
                     let ssm_a_data = self.weights.get_data(&format!("{prefix}.ssm_a"))?;
                     let ssm_dt_bias = self.weights.get_data(&format!("{prefix}.ssm_dt.bias"))?;
-                    let ssm_conv1d_w = self.weights.get_data(&format!("{prefix}.ssm_conv1d.weight"))?;
-                    let ssm_norm_w = self.weights.get_data(&format!("{prefix}.ssm_norm.weight"))?;
+                    let ssm_conv1d_w = self
+                        .weights
+                        .get_data(&format!("{prefix}.ssm_conv1d.weight"))?;
+                    let ssm_norm_w = self
+                        .weights
+                        .get_data(&format!("{prefix}.ssm_norm.weight"))?;
 
                     // Derive dimensions from tensor shapes
                     let conv_dim = inproj_t.shape.get(1).copied().unwrap_or(0); // 8192
@@ -666,15 +722,28 @@ impl InferenceContext {
                     let key_dim = (conv_dim - value_dim) / 2; // 2048
                     let v_hd = ssm_norm_w.len(); // v_head_dim = 128
                     let n_v_h = if v_hd > 0 { value_dim / v_hd } else { 1 }; // 32
-                    let k_hd = if n_v_h > 0 { key_dim / (n_v_h / 2).max(1) } else { 1 }; // 128
+                    let k_hd = if n_v_h > 0 {
+                        key_dim / (n_v_h / 2).max(1)
+                    } else {
+                        1
+                    }; // 128
                     let n_k_h = if k_hd > 0 { key_dim / k_hd } else { 1 }; // 16
-                    let d_conv = if conv_dim > 0 { ssm_conv1d_w.len() / conv_dim } else { 0 };
+                    let d_conv = if conv_dim > 0 {
+                        ssm_conv1d_w.len() / conv_dim
+                    } else {
+                        0
+                    };
 
                     // Step 1: QKV projection
                     let mut qkv = vec![0.0f32; conv_dim];
                     if !try_gpu!(&mut qkv, normed, layer_idx, "attn_qkv") {
                         crate::quant::matvec_col_major(
-                            &mut qkv, normed, inproj_t.raw(), inproj_t.qtype, n_embd, conv_dim,
+                            &mut qkv,
+                            normed,
+                            inproj_t.raw(),
+                            inproj_t.qtype,
+                            n_embd,
+                            conv_dim,
                         )?;
                     }
 
@@ -707,22 +776,32 @@ impl InferenceContext {
                     }
 
                     // Step 3: Split into Q, K, V
-                    let q_raw = &qkv[..key_dim];           // [2048] = 16 * 128
+                    let q_raw = &qkv[..key_dim]; // [2048] = 16 * 128
                     let k_raw = &qkv[key_dim..key_dim * 2]; // [2048] = 16 * 128
-                    let v_raw = &qkv[key_dim * 2..];        // [4096] = 32 * 128
+                    let v_raw = &qkv[key_dim * 2..]; // [4096] = 32 * 128
 
                     // Step 4: Z = output gate (from separate projection, NOT from QKV)
                     let mut z = vec![0.0f32; value_dim];
                     if !try_gpu!(&mut z, normed, layer_idx, "attn_gate") {
                         crate::quant::matvec_col_major(
-                            &mut z, normed, gate_t.raw(), gate_t.qtype, n_embd, value_dim,
+                            &mut z,
+                            normed,
+                            gate_t.raw(),
+                            gate_t.qtype,
+                            n_embd,
+                            value_dim,
                         )?;
                     }
 
                     // Step 5: Compute beta (write gate) and g (decay)
                     let mut beta_raw = vec![0.0f32; n_v_h];
                     crate::quant::matvec_col_major(
-                        &mut beta_raw, normed, ssm_beta_t.raw(), ssm_beta_t.qtype, n_embd, n_v_h,
+                        &mut beta_raw,
+                        normed,
+                        ssm_beta_t.raw(),
+                        ssm_beta_t.qtype,
+                        n_embd,
+                        n_v_h,
                     )?;
                     // beta = sigmoid(beta_raw)
                     for b in beta_raw.iter_mut() {
@@ -731,7 +810,12 @@ impl InferenceContext {
 
                     let mut a_raw = vec![0.0f32; n_v_h];
                     crate::quant::matvec_col_major(
-                        &mut a_raw, normed, ssm_alpha_t.raw(), ssm_alpha_t.qtype, n_embd, n_v_h,
+                        &mut a_raw,
+                        normed,
+                        ssm_alpha_t.raw(),
+                        ssm_alpha_t.qtype,
+                        n_embd,
+                        n_v_h,
                     )?;
                     // g = -exp(A_log) * softplus(a + dt_bias)
                     // All SSM parameters are in TILED V head order in the GGUF:
@@ -746,7 +830,11 @@ impl InferenceContext {
                         // Reference: g = -exp(A_log) * softplus(a + dt_bias) = ssm_a * softplus(...)
                         let ssm_a = ssm_a_data[h]; // already = -exp(A_log), tiled order
                         let sp_in = a_raw[h] + ssm_dt_bias[h];
-                        let sp = if sp_in > 10.0 { sp_in } else { (1.0_f32 + sp_in.exp()).ln() };
+                        let sp = if sp_in > 10.0 {
+                            sp_in
+                        } else {
+                            (1.0_f32 + sp_in.exp()).ln()
+                        };
                         g_decay[h] = ssm_a * sp; // negative × positive → negative → exp(g) < 1
                     }
 
@@ -773,17 +861,23 @@ impl InferenceContext {
                     for vh in 0..n_v_h {
                         let off = vh * k_hd;
                         let q_slice = &mut q_exp[off..off + k_hd];
-                        let norm_q: f32 = q_slice.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
-                        for x in q_slice.iter_mut() { *x = *x / norm_q * q_scale; }
+                        let norm_q: f32 =
+                            q_slice.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
+                        for x in q_slice.iter_mut() {
+                            *x = *x / norm_q * q_scale;
+                        }
                         let k_slice = &mut k_exp[off..off + k_hd];
-                        let norm_k: f32 = k_slice.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
-                        for x in k_slice.iter_mut() { *x /= norm_k; }
+                        let norm_k: f32 =
+                            k_slice.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
+                        for x in k_slice.iter_mut() {
+                            *x /= norm_k;
+                        }
                     }
 
                     // Step 8: Delta rule — state [n_v_h, k_hd, v_hd] = [32, 128, 128]
                     let state = &mut self.ssm_states[layer_idx];
                     let mut attn_result = vec![0.0f32; value_dim]; // [4096]
-                    // Reusable buffer to avoid per-head allocation
+                                                                   // Reusable buffer to avoid per-head allocation
                     let mut kv_mem = vec![0.0f32; v_hd];
 
                     for vh in 0..n_v_h {
@@ -841,29 +935,50 @@ impl InferenceContext {
                     let mut out = vec![0.0f32; n_embd];
                     if !try_gpu!(&mut out, &attn_result, layer_idx, "ssm_out") {
                         crate::quant::matvec_col_major(
-                            &mut out, &attn_result, ssm_out_t.raw(), ssm_out_t.qtype, value_dim, n_embd,
+                            &mut out,
+                            &attn_result,
+                            ssm_out_t.raw(),
+                            ssm_out_t.qtype,
+                            value_dim,
+                            n_embd,
                         )?;
                     }
                     out
                 } else {
                     // --- Full attention layer ---
                     // Use direct quantized matvec — avoids allocating 234 MB Vec<f32> per weight.
-                    let wq_t = self.weights.get(&format!("{prefix}.attn_q.weight"))
+                    let wq_t = self
+                        .weights
+                        .get(&format!("{prefix}.attn_q.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.attn_q.weight not found"))?;
-                    let wk_t = self.weights.get(&format!("{prefix}.attn_k.weight"))
+                    let wk_t = self
+                        .weights
+                        .get(&format!("{prefix}.attn_k.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.attn_k.weight not found"))?;
-                    let wv_t = self.weights.get(&format!("{prefix}.attn_v.weight"))
+                    let wv_t = self
+                        .weights
+                        .get(&format!("{prefix}.attn_v.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.attn_v.weight not found"))?;
-                    let wo_t = self.weights.get(&format!("{prefix}.attn_output.weight"))
+                    let wo_t = self
+                        .weights
+                        .get(&format!("{prefix}.attn_output.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.attn_output.weight not found"))?;
 
                     // Derive actual KV head dimensions from tensor shapes.
                     // Full attention layers may have different kv_head_dim than GDR layers.
                     // E.g., Qwen3.5-35B-A3B: GDR uses kv_head_dim=128, but full attention
                     // uses kv_head_dim=256 (attn_k.weight [2048, 512] = 2 heads × 256).
-                    let actual_kv_total = wk_t.shape.get(1).copied().unwrap_or(n_kv_heads * kv_head_dim);
+                    let actual_kv_total = wk_t
+                        .shape
+                        .get(1)
+                        .copied()
+                        .unwrap_or(n_kv_heads * kv_head_dim);
                     let actual_kv_head_dim = actual_kv_total / n_kv_heads.max(1);
-                    let actual_v_total = wv_t.shape.get(1).copied().unwrap_or(n_kv_heads * v_head_dim);
+                    let actual_v_total = wv_t
+                        .shape
+                        .get(1)
+                        .copied()
+                        .unwrap_or(n_kv_heads * v_head_dim);
                     let actual_v_head_dim = actual_v_total / n_kv_heads.max(1);
 
                     // Q weight packs [query, gate] interleaved per head:
@@ -876,13 +991,34 @@ impl InferenceContext {
                     let mut v = vec![0.0f32; actual_v_total];
 
                     if !try_gpu!(&mut qg, normed, layer_idx, "attn_q") {
-                        crate::quant::matvec_col_major(&mut qg, normed, wq_t.raw(), wq_t.qtype, n_embd, qg_total)?;
+                        crate::quant::matvec_col_major(
+                            &mut qg,
+                            normed,
+                            wq_t.raw(),
+                            wq_t.qtype,
+                            n_embd,
+                            qg_total,
+                        )?;
                     }
                     if !try_gpu!(&mut k, normed, layer_idx, "attn_k") {
-                        crate::quant::matvec_col_major(&mut k, normed, wk_t.raw(), wk_t.qtype, n_embd, actual_kv_total)?;
+                        crate::quant::matvec_col_major(
+                            &mut k,
+                            normed,
+                            wk_t.raw(),
+                            wk_t.qtype,
+                            n_embd,
+                            actual_kv_total,
+                        )?;
                     }
                     if !try_gpu!(&mut v, normed, layer_idx, "attn_v") {
-                        crate::quant::matvec_col_major(&mut v, normed, wv_t.raw(), wv_t.qtype, n_embd, actual_v_total)?;
+                        crate::quant::matvec_col_major(
+                            &mut v,
+                            normed,
+                            wv_t.raw(),
+                            wv_t.qtype,
+                            n_embd,
+                            actual_v_total,
+                        )?;
                     }
 
                     // De-interleave Q and gate: each head stores [q_head_dim Q, q_head_dim gate]
@@ -892,26 +1028,43 @@ impl InferenceContext {
                         let src = h_idx * q_head_dim * 2;
                         let dst = h_idx * q_head_dim;
                         q[dst..dst + q_head_dim].copy_from_slice(&qg[src..src + q_head_dim]);
-                        output_gate[dst..dst + q_head_dim].copy_from_slice(&qg[src + q_head_dim..src + 2 * q_head_dim]);
+                        output_gate[dst..dst + q_head_dim]
+                            .copy_from_slice(&qg[src + q_head_dim..src + 2 * q_head_dim]);
                     }
 
                     // Q/K norms (optional, present in qwen35moe)
-                    if let Ok(q_norm_w) = self.weights.get_data(&format!("{prefix}.attn_q_norm.weight")) {
+                    if let Ok(q_norm_w) = self
+                        .weights
+                        .get_data(&format!("{prefix}.attn_q_norm.weight"))
+                    {
                         // Apply per-head RMSNorm to the FIRST actual_kv_head_dim dims of each Q head
                         for h in 0..n_heads {
                             let off = h * q_head_dim;
                             // Normalize only the first actual_kv_head_dim elements of each Q head
                             let norm_end = actual_kv_head_dim.min(q_head_dim);
                             let mut qh_norm = q[off..off + norm_end].to_vec();
-                            ops::rms_norm(&mut qh_norm, &q[off..off + norm_end], &q_norm_w, rms_eps);
+                            ops::rms_norm(
+                                &mut qh_norm,
+                                &q[off..off + norm_end],
+                                &q_norm_w,
+                                rms_eps,
+                            );
                             q[off..off + norm_end].copy_from_slice(&qh_norm);
                         }
                     }
-                    if let Ok(k_norm_w) = self.weights.get_data(&format!("{prefix}.attn_k_norm.weight")) {
+                    if let Ok(k_norm_w) = self
+                        .weights
+                        .get_data(&format!("{prefix}.attn_k_norm.weight"))
+                    {
                         for h in 0..n_kv_heads {
                             let off = h * actual_kv_head_dim;
                             let mut kh_norm = k[off..off + actual_kv_head_dim].to_vec();
-                            ops::rms_norm(&mut kh_norm, &k[off..off + actual_kv_head_dim], &k_norm_w, rms_eps);
+                            ops::rms_norm(
+                                &mut kh_norm,
+                                &k[off..off + actual_kv_head_dim],
+                                &k_norm_w,
+                                rms_eps,
+                            );
                             k[off..off + actual_kv_head_dim].copy_from_slice(&kh_norm);
                         }
                     }
@@ -942,14 +1095,20 @@ impl InferenceContext {
                             let mut k_head = k[k_off..k_off + actual_kv_head_dim].to_vec();
                             if let Some(ref freqs) = attn_freqs {
                                 ops::apply_rope_with_freqs(
-                                    &mut q_head, &mut k_head,
-                                    abs_pos, actual_kv_head_dim, freqs,
+                                    &mut q_head,
+                                    &mut k_head,
+                                    abs_pos,
+                                    actual_kv_head_dim,
+                                    freqs,
                                 );
                             } else {
                                 ops::apply_rope(
-                                    &mut q_head, &mut k_head,
-                                    abs_pos, actual_kv_head_dim,
-                                    attn_rope_dim, rope_freq_base,
+                                    &mut q_head,
+                                    &mut k_head,
+                                    abs_pos,
+                                    actual_kv_head_dim,
+                                    attn_rope_dim,
+                                    rope_freq_base,
                                 );
                             }
                             k[k_off..k_off + actual_kv_head_dim].copy_from_slice(&k_head);
@@ -958,14 +1117,20 @@ impl InferenceContext {
                             let mut dummy_k = vec![0.0f32; actual_kv_head_dim];
                             if let Some(ref freqs) = attn_freqs {
                                 ops::apply_rope_with_freqs(
-                                    &mut q_head, &mut dummy_k,
-                                    abs_pos, actual_kv_head_dim, freqs,
+                                    &mut q_head,
+                                    &mut dummy_k,
+                                    abs_pos,
+                                    actual_kv_head_dim,
+                                    freqs,
                                 );
                             } else {
                                 ops::apply_rope(
-                                    &mut q_head, &mut dummy_k,
-                                    abs_pos, actual_kv_head_dim,
-                                    attn_rope_dim, rope_freq_base,
+                                    &mut q_head,
+                                    &mut dummy_k,
+                                    abs_pos,
+                                    actual_kv_head_dim,
+                                    attn_rope_dim,
+                                    rope_freq_base,
                                 );
                             }
                         }
@@ -1004,13 +1169,15 @@ impl InferenceContext {
                             let scale = 1.0 / (actual_kv_head_dim as f32).sqrt();
                             let mut scores = vec![0.0f32; total_seq];
                             for (t, score) in scores.iter_mut().enumerate() {
-                                let kv_idx = t * n_kv_heads * actual_kv_head_dim + kv_h * actual_kv_head_dim;
+                                let kv_idx =
+                                    t * n_kv_heads * actual_kv_head_dim + kv_h * actual_kv_head_dim;
                                 let k_slice = &cache.key_cache[kv_idx..kv_idx + actual_kv_head_dim];
                                 *score = crate::simd::dot_product(q_attn, k_slice) * scale;
                             }
                             ops::softmax(&mut scores);
                             for (t, &w) in scores.iter().enumerate() {
-                                let v_idx = t * n_kv_heads * actual_v_head_dim + kv_h * actual_v_head_dim;
+                                let v_idx =
+                                    t * n_kv_heads * actual_v_head_dim + kv_h * actual_v_head_dim;
                                 let n = actual_kv_head_dim.min(actual_v_head_dim);
                                 for (d, ho) in head_out.iter_mut().enumerate().take(n) {
                                     *ho += w * cache.value_cache[v_idx + d];
@@ -1032,7 +1199,12 @@ impl InferenceContext {
                     let mut proj_out = vec![0.0f32; n_embd];
                     if !try_gpu!(&mut proj_out, &attn_out, layer_idx, "attn_output") {
                         crate::quant::matvec_col_major(
-                            &mut proj_out, &attn_out, wo_t.raw(), wo_t.qtype, attn_out_total, n_embd,
+                            &mut proj_out,
+                            &attn_out,
+                            wo_t.raw(),
+                            wo_t.qtype,
+                            attn_out_total,
+                            n_embd,
                         )?;
                     }
                     proj_out
@@ -1049,7 +1221,10 @@ impl InferenceContext {
             // --- FFN with pre-FFN norm ---
             // In qwen35moe the pre-FFN norm is `post_attention_norm.weight`
             // Fall back to `ffn_norm.weight` for other architectures
-            let ffn_norm_key = if self.weights.has(&format!("{prefix}.post_attention_norm.weight")) {
+            let ffn_norm_key = if self
+                .weights
+                .has(&format!("{prefix}.post_attention_norm.weight"))
+            {
                 format!("{prefix}.post_attention_norm.weight")
             } else {
                 format!("{prefix}.ffn_norm.weight")
@@ -1077,14 +1252,21 @@ impl InferenceContext {
                     let expert_ffn_dim = moe_cfg.expert_intermediate_size;
 
                     // Router: gate_inp.weight [ne0=n_embd, ne1=n_experts] F32
-                    let router_t = self.weights.get(&format!("{prefix}.ffn_gate_inp.weight"))
+                    let router_t = self
+                        .weights
+                        .get(&format!("{prefix}.ffn_gate_inp.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_gate_inp.weight not found"))?;
                     let router_raw = router_t.raw();
                     let router_qtype = router_t.qtype;
 
                     let mut logits = vec![0.0f32; n_experts];
                     crate::quant::matvec_col_major(
-                        &mut logits, normed, router_raw, router_qtype, n_embd, n_experts
+                        &mut logits,
+                        normed,
+                        router_raw,
+                        router_qtype,
+                        n_embd,
+                        n_experts,
                     )?;
 
                     // Routing weights: softmax probabilities, then select top-k, then renormalize
@@ -1095,14 +1277,17 @@ impl InferenceContext {
 
                     // Apply softmax over all experts
                     let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                    let exp_logits: Vec<f32> = logits.iter().map(|&l| (l - max_logit).exp()).collect();
+                    let exp_logits: Vec<f32> =
+                        logits.iter().map(|&l| (l - max_logit).exp()).collect();
                     let exp_sum: f32 = exp_logits.iter().sum();
                     let probs: Vec<f32> = exp_logits.iter().map(|e| e / exp_sum).collect();
 
                     // Top-k selection from softmax probs
                     let mut ranked: Vec<usize> = (0..n_experts).collect();
                     ranked.select_nth_unstable_by(top_k - 1, |&a, &b| {
-                        probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal)
+                        probs[b]
+                            .partial_cmp(&probs[a])
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     });
                     ranked.truncate(top_k);
 
@@ -1128,12 +1313,22 @@ impl InferenceContext {
 
                     // Compute each selected expert's output — directly on quantized bytes.
                     // No f32 materialisation: ~22 MB per expert saved per call.
-                    let gate_t = self.weights.get(&format!("{prefix}.ffn_gate_exps.weight"))
-                        .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_gate_exps.weight not found"))?;
-                    let up_t = self.weights.get(&format!("{prefix}.ffn_up_exps.weight"))
+                    let gate_t = self
+                        .weights
+                        .get(&format!("{prefix}.ffn_gate_exps.weight"))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("{prefix}.ffn_gate_exps.weight not found")
+                        })?;
+                    let up_t = self
+                        .weights
+                        .get(&format!("{prefix}.ffn_up_exps.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_up_exps.weight not found"))?;
-                    let down_t = self.weights.get(&format!("{prefix}.ffn_down_exps.weight"))
-                        .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_down_exps.weight not found"))?;
+                    let down_t = self
+                        .weights
+                        .get(&format!("{prefix}.ffn_down_exps.weight"))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("{prefix}.ffn_down_exps.weight not found")
+                        })?;
 
                     let hot_experts = self
                         .hot_indices_for_layer(layer_idx)
@@ -1141,15 +1336,28 @@ impl InferenceContext {
                         .map(|indices| indices.to_vec());
 
                     // Extract shared expert data before branching (enables overlap in parallel path)
-                    let shared_expert_refs = if self.weights.has(&format!("{prefix}.ffn_gate_shexp.weight")) {
-                        let sg = self.weights.get(&format!("{prefix}.ffn_gate_shexp.weight")).unwrap();
-                        let su = self.weights.get(&format!("{prefix}.ffn_up_shexp.weight")).unwrap();
-                        let sd = self.weights.get(&format!("{prefix}.ffn_down_shexp.weight")).unwrap();
-                        let gate_w = self.weights.get_data(&format!("{prefix}.ffn_gate_inp_shexp.weight")).ok();
-                        Some((sg.raw(), su.raw(), sd.raw(), sg.qtype, gate_w))
-                    } else {
-                        None
-                    };
+                    let shared_expert_refs =
+                        if self.weights.has(&format!("{prefix}.ffn_gate_shexp.weight")) {
+                            let sg = self
+                                .weights
+                                .get(&format!("{prefix}.ffn_gate_shexp.weight"))
+                                .unwrap();
+                            let su = self
+                                .weights
+                                .get(&format!("{prefix}.ffn_up_shexp.weight"))
+                                .unwrap();
+                            let sd = self
+                                .weights
+                                .get(&format!("{prefix}.ffn_down_shexp.weight"))
+                                .unwrap();
+                            let gate_w = self
+                                .weights
+                                .get_data(&format!("{prefix}.ffn_gate_inp_shexp.weight"))
+                                .ok();
+                            Some((sg.raw(), su.raw(), sd.raw(), sg.qtype, gate_w))
+                        } else {
+                            None
+                        };
 
                     let used_hot_cache = hot_experts.is_some();
 
@@ -1174,7 +1382,8 @@ impl InferenceContext {
                             let weight = sel_logits[rank];
                             let mut expert_out = vec![0.0f32; n_embd];
 
-                            if let Some(cached) = self.hot_expert_cache[layer_idx].get(&expert_idx) {
+                            if let Some(cached) = self.hot_expert_cache[layer_idx].get(&expert_idx)
+                            {
                                 crate::ops::ffn_swiglu(
                                     &mut expert_out,
                                     normed,
@@ -1205,7 +1414,6 @@ impl InferenceContext {
                             }
                         }
                     } else {
-
                         // Prefetch ALL selected experts' pages upfront
                         for &eidx in &ranked {
                             if let (Ok((g, _)), Ok((u, _)), Ok((d, _))) = (
@@ -1233,9 +1441,14 @@ impl InferenceContext {
                                     let (ur, _) = up_t.expert_raw_slice(expert_idx)?;
                                     let (dr, _) = down_t.expert_raw_slice(expert_idx)?;
                                     crate::quant::ffn_swiglu_q(
-                                        &mut expert_out, normed,
-                                        gr, ur, dr,
-                                        qtype, n_embd, expert_ffn_dim,
+                                        &mut expert_out,
+                                        normed,
+                                        gr,
+                                        ur,
+                                        dr,
+                                        qtype,
+                                        n_embd,
+                                        expert_ffn_dim,
                                     )?;
                                     results.push((w_first[i], expert_out));
                                 }
@@ -1249,9 +1462,14 @@ impl InferenceContext {
                                     let (ur, _) = up_t.expert_raw_slice(expert_idx)?;
                                     let (dr, _) = down_t.expert_raw_slice(expert_idx)?;
                                     crate::quant::ffn_swiglu_q(
-                                        &mut expert_out, normed,
-                                        gr, ur, dr,
-                                        qtype, n_embd, expert_ffn_dim,
+                                        &mut expert_out,
+                                        normed,
+                                        gr,
+                                        ur,
+                                        dr,
+                                        qtype,
+                                        n_embd,
+                                        expert_ffn_dim,
                                     )?;
                                     results.push((w_second[i], expert_out));
                                 }
@@ -1262,15 +1480,27 @@ impl InferenceContext {
                             // routed experts run on spawned threads.
                             // On ≤2 cores: skip overlap (would cause contention).
                             let sh_result: Option<(Vec<f32>, f32)> = if cpu_cores >= 3 {
-                                if let Some((sg_raw, su_raw, sd_raw, sh_qt, ref gate_w)) = shared_expert_refs {
+                                if let Some((sg_raw, su_raw, sd_raw, sh_qt, ref gate_w)) =
+                                    shared_expert_refs
+                                {
                                     let mut sh_out = vec![0.0f32; n_embd];
                                     crate::quant::ffn_swiglu_q(
-                                        &mut sh_out, normed,
-                                        sg_raw, su_raw, sd_raw, sh_qt, n_embd, expert_ffn_dim,
+                                        &mut sh_out,
+                                        normed,
+                                        sg_raw,
+                                        su_raw,
+                                        sd_raw,
+                                        sh_qt,
+                                        n_embd,
+                                        expert_ffn_dim,
                                     )?;
                                     let scale = if let Some(ref gw) = *gate_w {
                                         if gw.len() == n_embd {
-                                            let dot: f32 = gw.iter().zip(normed.iter()).map(|(a, b)| a * b).sum();
+                                            let dot: f32 = gw
+                                                .iter()
+                                                .zip(normed.iter())
+                                                .map(|(a, b)| a * b)
+                                                .sum();
                                             1.0 / (1.0 + (-dot).exp())
                                         } else {
                                             gw.first().copied().unwrap_or(1.0)
@@ -1286,8 +1516,12 @@ impl InferenceContext {
                                 None
                             };
 
-                            let r1 = t1.join().map_err(|_| anyhow::anyhow!("thread 1 panicked"))??;
-                            let r2 = t2.join().map_err(|_| anyhow::anyhow!("thread 2 panicked"))??;
+                            let r1 = t1
+                                .join()
+                                .map_err(|_| anyhow::anyhow!("thread 1 panicked"))??;
+                            let r2 = t2
+                                .join()
+                                .map_err(|_| anyhow::anyhow!("thread 2 panicked"))??;
                             for (weight, expert_out) in r1.into_iter().chain(r2.into_iter()) {
                                 for (o, e) in ffn_out.iter_mut().zip(expert_out.iter()) {
                                     *o += weight * e;
@@ -1305,15 +1539,24 @@ impl InferenceContext {
                     // Shared expert: runs sequentially when not already overlapped.
                     // Overlapped in parallel path on ≥3 cores; sequential otherwise.
                     if used_hot_cache || cpu_cores < 3 {
-                        if let Some((sg_raw, su_raw, sd_raw, sh_qt, ref gate_w)) = shared_expert_refs {
+                        if let Some((sg_raw, su_raw, sd_raw, sh_qt, ref gate_w)) =
+                            shared_expert_refs
+                        {
                             let mut sh_out = vec![0.0f32; n_embd];
                             crate::quant::ffn_swiglu_q(
-                                &mut sh_out, normed,
-                                sg_raw, su_raw, sd_raw, sh_qt, n_embd, expert_ffn_dim,
+                                &mut sh_out,
+                                normed,
+                                sg_raw,
+                                su_raw,
+                                sd_raw,
+                                sh_qt,
+                                n_embd,
+                                expert_ffn_dim,
                             )?;
                             let scale = if let Some(ref gw) = *gate_w {
                                 if gw.len() == n_embd {
-                                    let dot: f32 = gw.iter().zip(normed.iter()).map(|(a, b)| a * b).sum();
+                                    let dot: f32 =
+                                        gw.iter().zip(normed.iter()).map(|(a, b)| a * b).sum();
                                     1.0 / (1.0 + (-dot).exp())
                                 } else {
                                     gw.first().copied().unwrap_or(1.0)
@@ -1328,11 +1571,17 @@ impl InferenceContext {
                     }
                 } else {
                     // Dense FFN — quantized path (no f32 materialisation)
-                    let ffn_gate_t = self.weights.get(&format!("{prefix}.ffn_gate.weight"))
+                    let ffn_gate_t = self
+                        .weights
+                        .get(&format!("{prefix}.ffn_gate.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_gate.weight not found"))?;
-                    let ffn_up_t = self.weights.get(&format!("{prefix}.ffn_up.weight"))
+                    let ffn_up_t = self
+                        .weights
+                        .get(&format!("{prefix}.ffn_up.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_up.weight not found"))?;
-                    let ffn_down_t = self.weights.get(&format!("{prefix}.ffn_down.weight"))
+                    let ffn_down_t = self
+                        .weights
+                        .get(&format!("{prefix}.ffn_down.weight"))
                         .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_down.weight not found"))?;
                     let n_ff = self.config.feed_forward_length;
 
@@ -1363,15 +1612,23 @@ impl InferenceContext {
                         )?;
                     } else {
                         crate::quant::ffn_swiglu_q(
-                            ffn_out, normed,
-                            ffn_gate_t.raw(), ffn_up_t.raw(), ffn_down_t.raw(),
-                            ffn_gate_t.qtype, n_embd, n_ff,
+                            ffn_out,
+                            normed,
+                            ffn_gate_t.raw(),
+                            ffn_up_t.raw(),
+                            ffn_down_t.raw(),
+                            ffn_gate_t.qtype,
+                            n_embd,
+                            n_ff,
                         )?;
                     }
                 }
 
                 // Residual: in-place add ffn_out to scratch_layer_out
-                for (o, &f) in scratch_layer_out[pos_offset..pos_offset + n_embd].iter_mut().zip(ffn_out.iter()) {
+                for (o, &f) in scratch_layer_out[pos_offset..pos_offset + n_embd]
+                    .iter_mut()
+                    .zip(ffn_out.iter())
+                {
                     *o += f;
                 }
             }
@@ -1394,7 +1651,12 @@ impl InferenceContext {
         let lm_start = std::time::Instant::now();
         let output_norm_w = self.weights.get_data("output_norm.weight")?;
         let mut final_x = vec![0.0f32; n_embd];
-        ops::rms_norm(&mut final_x, &x[(n_tokens - 1) * n_embd..], &output_norm_w, rms_eps);
+        ops::rms_norm(
+            &mut final_x,
+            &x[(n_tokens - 1) * n_embd..],
+            &output_norm_w,
+            rms_eps,
+        );
 
         // LM head: output.weight [ne0=n_embd, ne1=n_vocab] — use quantized col-major matmul
         let lm_head_tensor = self
@@ -1553,7 +1815,9 @@ impl InferenceContext {
         let kv_head_dim = self.config.attention.kv_head_dim();
         self.layer_caches = (0..self.config.block_count)
             .map(|layer_idx| {
-                let layer_kv_dim = self.weights.get(&format!("blk.{layer_idx}.attn_k.weight"))
+                let layer_kv_dim = self
+                    .weights
+                    .get(&format!("blk.{layer_idx}.attn_k.weight"))
                     .and_then(|t| t.shape.get(1).copied())
                     .map(|total| total / n_kv_heads.max(1))
                     .unwrap_or(kv_head_dim);
@@ -1591,13 +1855,13 @@ impl InferenceContext {
             cache.key_cache.clear();
             cache.value_cache.clear();
             if self.use_compressed_cache {
-                let layer_kv_dim = self.weights.get(&format!("blk.{layer_idx}.attn_k.weight"))
+                let layer_kv_dim = self
+                    .weights
+                    .get(&format!("blk.{layer_idx}.attn_k.weight"))
                     .and_then(|t| t.shape.get(1).copied())
                     .map(|total| total / n_kv_heads.max(1))
                     .unwrap_or(kv_head_dim);
-                cache.compressed = Some(CompressedKVCache::new(
-                    n_kv_heads, layer_kv_dim,
-                ));
+                cache.compressed = Some(CompressedKVCache::new(n_kv_heads, layer_kv_dim));
             }
         }
         for state in &mut self.ssm_states {
@@ -1650,7 +1914,10 @@ impl InferenceContext {
 }
 
 fn diagnostics_enabled() -> bool {
-    matches!(std::env::var("POWERINFER_TRACE_TOKENS").as_deref(), Ok("1") | Ok("true") | Ok("TRUE"))
+    matches!(
+        std::env::var("POWERINFER_TRACE_TOKENS").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
 }
 
 /// Greedy sampling: pick the token with highest logit
@@ -1796,7 +2063,9 @@ impl SplitMix64 {
 /// Prefetch mmap pages into OS page cache using madvise(MADV_WILLNEED).
 /// Non-blocking: tells the kernel to asynchronously read pages ahead.
 fn prefetch_mmap(data: &[u8]) {
-    if data.is_empty() { return; }
+    if data.is_empty() {
+        return;
+    }
     #[cfg(target_os = "linux")]
     {
         // SAFETY: data is a valid memory-mapped region; MADV_WILLNEED is advisory only.

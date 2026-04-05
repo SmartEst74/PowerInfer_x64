@@ -278,7 +278,12 @@ impl TurboQuant {
 
     /// Fast dot product using precomputed query data.
     /// O(dim + qjl_bits) per call instead of O(dim² + dim × qjl_bits).
-    pub fn dot_precomputed(&self, q_rot_scaled: &[f32], qjl_proj_scaled: &[f32], packed_key: &[u8]) -> f32 {
+    pub fn dot_precomputed(
+        &self,
+        q_rot_scaled: &[f32],
+        qjl_proj_scaled: &[f32],
+        packed_key: &[u8],
+    ) -> f32 {
         let indices = unpack_indices(packed_key, self.bits, self.dim);
 
         // MSE dot: <q_rot_scaled, k_quantized>
@@ -517,7 +522,9 @@ impl CompressedKVCache {
 
         for (t, &w) in weights.iter().enumerate() {
             // Skip negligible weights — after softmax most positions contribute < 1e-7
-            if w < 1e-7 { continue; }
+            if w < 1e-7 {
+                continue;
+            }
             let offset = t * stride + kv_head_idx * self.head_dim;
             for d in 0..self.head_dim {
                 out[d] += w * self.values[offset + d].to_f32();
@@ -534,7 +541,9 @@ impl CompressedKVCache {
 
     /// Memory usage in bytes
     pub fn memory_bytes(&self) -> usize {
-        let key_bytes: usize = self.compressed_keys.iter()
+        let key_bytes: usize = self
+            .compressed_keys
+            .iter()
             .flat_map(|token| token.iter())
             .map(|packed| packed.len())
             .sum();

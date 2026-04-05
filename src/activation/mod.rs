@@ -261,7 +261,9 @@ pub struct HotLayer {
 impl HotNeuronIndex {
     /// Get a layer entry by layer index.
     pub fn layer(&self, layer_idx: usize) -> Option<&HotLayer> {
-        self.layers.iter().find(|layer| layer.layer_idx == layer_idx)
+        self.layers
+            .iter()
+            .find(|layer| layer.layer_idx == layer_idx)
     }
 
     /// Save to JSON file
@@ -425,7 +427,8 @@ pub fn run_activation_profiling(
         return Err(anyhow!("no layers available for activation profiling"));
     }
 
-    let recorder = ActivationRecorder::new(ActivationProfile::new_with_dims(&layer_dims, threshold));
+    let recorder =
+        ActivationRecorder::new(ActivationProfile::new_with_dims(&layer_dims, threshold));
     ctx.set_activation_recorder(recorder.clone());
 
     let mut prompts_processed = 0;
@@ -450,7 +453,9 @@ pub fn run_activation_profiling(
     ctx.clear_activation_recorder();
 
     if prompts_processed == 0 {
-        return Err(anyhow!("no non-empty prompts were processed during activation profiling"));
+        return Err(anyhow!(
+            "no non-empty prompts were processed during activation profiling"
+        ));
     }
 
     let profile = recorder.snapshot();

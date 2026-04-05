@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
 
     ctx.reset();
 
-    // Test 4: 10 tokens  
+    // Test 4: 10 tokens
     let prompt = "def fibonacci(n):\n    if";
     let input_ids = ctx.tokenizer().encode(prompt);
     eprintln!("\n=== 10-TOKEN PROMPT ({} tokens) ===", input_ids.len());

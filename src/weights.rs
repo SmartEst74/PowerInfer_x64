@@ -233,7 +233,9 @@ impl Weights {
     }
 
     #[cfg(not(unix))]
-    pub fn mlock(&self, _names: &[String]) -> usize { 0 }
+    pub fn mlock(&self, _names: &[String]) -> usize {
+        0
+    }
 
     pub fn get(&self, n: &str) -> Option<&WeightTensor> {
         self.tensors.get(n)

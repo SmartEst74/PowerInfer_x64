@@ -14,22 +14,32 @@ fn main() -> anyhow::Result<()> {
 
     // Test each prefix length
     for n in [15, 16, 17, 18, 19] {
-        if n > all_ids.len() { break; }
+        if n > all_ids.len() {
+            break;
+        }
         ctx.reset();
         let ids = &all_ids[..n];
         let logits = ctx.forward(ids)?;
         let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let top = &indexed[..3];
-        let top_str: Vec<String> = top.iter().map(|&(id, l)| {
-            format!("{}({:.2})", ctx.tokenizer().decode(&[id as u32]).replace('\n', "\\n"), l)
-        }).collect();
+        let top_str: Vec<String> = top
+            .iter()
+            .map(|&(id, l)| {
+                format!(
+                    "{}({:.2})",
+                    ctx.tokenizer().decode(&[id as u32]).replace('\n', "\\n"),
+                    l
+                )
+            })
+            .collect();
         eprintln!("{n:>2} tokens: {}", top_str.join(", "));
     }
 
     // Now test a DIFFERENT 19+ token English prompt
     ctx.reset();
-    let eng_prompt = "The quick brown fox jumps over the lazy dog and the cat sat on the mat near the";
+    let eng_prompt =
+        "The quick brown fox jumps over the lazy dog and the cat sat on the mat near the";
     let eng_ids = ctx.tokenizer().encode(eng_prompt);
     eprintln!("\nEnglish test ({} tokens):", eng_ids.len());
     let logits = ctx.forward(&eng_ids)?;
@@ -67,9 +77,11 @@ fn main() -> anyhow::Result<()> {
         } else {
             "<END>".to_string()
         };
-        eprintln!("  After {} (pos={i}): top={top_tok:?}({:.2}) expect={expected:?}", 
+        eprintln!(
+            "  After {} (pos={i}): top={top_tok:?}({:.2}) expect={expected:?}",
             ctx.tokenizer().decode(&[tok]),
-            indexed[0].1);
+            indexed[0].1
+        );
     }
 
     Ok(())

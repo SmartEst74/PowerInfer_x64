@@ -89,7 +89,10 @@ impl MemoryGuard {
 
         if self.overcommit_mode != 0 {
             // Overcommit disabled — no commit limit enforced
-            eprintln!("[memory] Overcommit mode: {} (commit limit not enforced)", self.overcommit_mode);
+            eprintln!(
+                "[memory] Overcommit mode: {} (commit limit not enforced)",
+                self.overcommit_mode
+            );
             return true;
         }
 
@@ -105,7 +108,9 @@ impl MemoryGuard {
 
         if !safe {
             eprintln!("[memory] WARNING: commit headroom {headroom_gb:.1} GB is dangerously low.");
-            eprintln!("[memory]   The OOM killer may terminate this process or the desktop session.");
+            eprintln!(
+                "[memory]   The OOM killer may terminate this process or the desktop session."
+            );
             eprintln!("[memory]   Recommended fix — run ONE of the following:");
             eprintln!("[memory]");
             eprintln!("[memory]   Option A — disable commit limit (instant, until reboot):");
@@ -172,8 +177,14 @@ impl CpuCapabilities {
                         cap.model_name = line.split(':').nth(1).unwrap_or("").trim().to_string();
                     }
                 } else if line.starts_with("cpu MHz") {
-                    if let Some(mhz) = line.split(':').nth(1).and_then(|s| s.trim().parse::<f64>().ok()) {
-                        if mhz > cap.base_mhz { cap.base_mhz = mhz; }
+                    if let Some(mhz) = line
+                        .split(':')
+                        .nth(1)
+                        .and_then(|s| s.trim().parse::<f64>().ok())
+                    {
+                        if mhz > cap.base_mhz {
+                            cap.base_mhz = mhz;
+                        }
                     }
                 } else if line.starts_with("flags") || line.starts_with("Features") {
                     let flags_str = line.split(':').nth(1).unwrap_or("");
@@ -188,7 +199,8 @@ impl CpuCapabilities {
                     cap.fma = flags.contains(&"fma");
                     cap.f16c = flags.contains(&"f16c");
                     cap.avx512f = flags.contains(&"avx512f");
-                    cap.avx512vnni = flags.contains(&"avx512_vnni") || flags.contains(&"avx512vnni");
+                    cap.avx512vnni =
+                        flags.contains(&"avx512_vnni") || flags.contains(&"avx512vnni");
                     cap.popcnt = flags.contains(&"popcnt");
                     cap.aes = flags.contains(&"aes");
                     cap.pclmul = flags.contains(&"pclmulqdq");
@@ -207,7 +219,9 @@ impl CpuCapabilities {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 for line in stdout.lines() {
                     let parts: Vec<&str> = line.splitn(2, ':').collect();
-                    if parts.len() < 2 { continue; }
+                    if parts.len() < 2 {
+                        continue;
+                    }
                     let key = parts[0].trim();
                     let val = parts[1].trim();
                     match key {
@@ -223,14 +237,22 @@ impl CpuCapabilities {
 
         // macOS fallback: sysctl for CPU info
         if cap.model_name.is_empty() {
-            if let Ok(out) = Command::new("sysctl").arg("-n").arg("machdep.cpu.brand_string").output() {
+            if let Ok(out) = Command::new("sysctl")
+                .arg("-n")
+                .arg("machdep.cpu.brand_string")
+                .output()
+            {
                 if out.status.success() {
                     cap.model_name = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 }
             }
         }
         if cap.base_mhz < 1.0 {
-            if let Ok(out) = Command::new("sysctl").arg("-n").arg("hw.cpufrequency_max").output() {
+            if let Ok(out) = Command::new("sysctl")
+                .arg("-n")
+                .arg("hw.cpufrequency_max")
+                .output()
+            {
                 if out.status.success() {
                     if let Ok(hz) = String::from_utf8_lossy(&out.stdout).trim().parse::<f64>() {
                         cap.base_mhz = hz / 1_000_000.0;
@@ -244,26 +266,43 @@ impl CpuCapabilities {
 
     /// The best SIMD tier name this CPU supports.
     pub fn best_simd(&self) -> &'static str {
-        if self.avx512vnni { "AVX-512 VNNI" }
-        else if self.avx512f { "AVX-512F" }
-        else if self.avx2 && self.fma { "AVX2+FMA" }
-        else if self.avx2 { "AVX2" }
-        else if self.avx { "AVX" }
-        else if self.sse42 { "SSE4.2" }
-        else if self.sse41 { "SSE4.1" }
-        else if self.ssse3 { "SSSE3" }
-        else if self.sse2 { "SSE2" }
-        else { "Scalar" }
+        if self.avx512vnni {
+            "AVX-512 VNNI"
+        } else if self.avx512f {
+            "AVX-512F"
+        } else if self.avx2 && self.fma {
+            "AVX2+FMA"
+        } else if self.avx2 {
+            "AVX2"
+        } else if self.avx {
+            "AVX"
+        } else if self.sse42 {
+            "SSE4.2"
+        } else if self.sse41 {
+            "SSE4.1"
+        } else if self.ssse3 {
+            "SSSE3"
+        } else if self.sse2 {
+            "SSE2"
+        } else {
+            "Scalar"
+        }
     }
 
     /// Estimated single-core throughput for Q8_0 matvec (GOPS/s) given SIMD width.
     /// Based on measured benchmarks: SSE4.1 ~2 GOPS, AVX2+FMA ~8 GOPS, AVX-512 ~16 GOPS.
     pub fn estimated_matvec_gops(&self) -> f64 {
-        if self.avx512f { 16.0 }
-        else if self.avx2 && self.fma { 8.0 }
-        else if self.avx2 { 5.0 }
-        else if self.sse41 { 2.0 }
-        else { 0.8 }
+        if self.avx512f {
+            16.0
+        } else if self.avx2 && self.fma {
+            8.0
+        } else if self.avx2 {
+            5.0
+        } else if self.sse41 {
+            2.0
+        } else {
+            0.8
+        }
     }
 }
 
@@ -302,10 +341,14 @@ impl PcieLink {
             ])
             .output()
             .ok()?;
-        if !output.status.success() { return None; }
+        if !output.status.success() {
+            return None;
+        }
         let stdout = String::from_utf8_lossy(&output.stdout);
         let parts: Vec<&str> = stdout.trim().split(',').map(|s| s.trim()).collect();
-        if parts.len() < 2 { return None; }
+        if parts.len() < 2 {
+            return None;
+        }
         let gen: u32 = parts[0].parse().ok()?;
         let width: u32 = parts[1].parse().ok()?;
         // Per-lane bandwidth: Gen1=250 MB/s, Gen2=500, Gen3=985, Gen4=1969, Gen5=3938
@@ -352,17 +395,24 @@ impl StorageInfo {
         match output {
             Ok(out) if out.status.success() => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                stdout.lines().filter_map(|line| {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() < 4 { return None; }
-                    if parts[2] != "disk" { return None; }
-                    Some(StorageInfo {
-                        device: parts[0].to_string(),
-                        rotational: parts[1] == "1",
-                        transport: parts[3].to_string(),
-                        seq_read_mbs: 0.0,
+                stdout
+                    .lines()
+                    .filter_map(|line| {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() < 4 {
+                            return None;
+                        }
+                        if parts[2] != "disk" {
+                            return None;
+                        }
+                        Some(StorageInfo {
+                            device: parts[0].to_string(),
+                            rotational: parts[1] == "1",
+                            transport: parts[3].to_string(),
+                            seq_read_mbs: 0.0,
+                        })
                     })
-                }).collect()
+                    .collect()
             }
             _ => Vec::new(),
         }
@@ -396,20 +446,32 @@ impl HardwareProfile {
         let cpu = CpuCapabilities::detect();
         let memory = MemoryGuard::check();
         let gpus = detect_gpus();
-        let pcie: Vec<PcieLink> = gpus.iter().filter_map(|g| PcieLink::detect(g.index)).collect();
+        let pcie: Vec<PcieLink> = gpus
+            .iter()
+            .filter_map(|g| PcieLink::detect(g.index))
+            .collect();
         let storage = StorageInfo::detect_all();
         let (has_igp, igp_name) = detect_igp();
         let cuda_version = detect_cuda_version();
 
         let overhead_per_gpu = 512 * 1024 * 1024u64;
-        let total_usable_vram: u64 = gpus.iter()
+        let total_usable_vram: u64 = gpus
+            .iter()
             .map(|g| g.free_vram.saturating_sub(overhead_per_gpu))
             .sum();
         let available_ram = memory.mem_available_kb * 1024;
 
         Self {
-            cpu, memory, gpus, pcie, storage, has_igp, igp_name, cuda_version,
-            total_usable_vram, available_ram,
+            cpu,
+            memory,
+            gpus,
+            pcie,
+            storage,
+            has_igp,
+            igp_name,
+            cuda_version,
+            total_usable_vram,
+            available_ram,
         }
     }
 
@@ -421,20 +483,30 @@ impl HardwareProfile {
 
         // CPU
         eprintln!("║ CPU: {}", self.cpu.model_name);
-        eprintln!("║   Cores: {} physical, {} logical, {} socket(s)",
-            self.cpu.physical_cores, self.cpu.logical_cores, self.cpu.sockets);
+        eprintln!(
+            "║   Cores: {} physical, {} logical, {} socket(s)",
+            self.cpu.physical_cores, self.cpu.logical_cores, self.cpu.sockets
+        );
         eprintln!("║   Clock: {:.0} MHz", self.cpu.base_mhz);
         eprintln!("║   SIMD:  {} (best tier)", self.cpu.best_simd());
-        eprintln!("║   Cache: L1d={} KB  L2={} KB  L3={} KB",
-            self.cpu.cache_l1d / 1024, self.cpu.cache_l2 / 1024, self.cpu.cache_l3 / 1024);
+        eprintln!(
+            "║   Cache: L1d={} KB  L2={} KB  L3={} KB",
+            self.cpu.cache_l1d / 1024,
+            self.cpu.cache_l2 / 1024,
+            self.cpu.cache_l3 / 1024
+        );
 
         // Memory
         let (total_ram_bytes, _) = detect_ram();
-        eprintln!("║ RAM: {:.1} GB total, {:.1} GB available",
+        eprintln!(
+            "║ RAM: {:.1} GB total, {:.1} GB available",
             total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-            self.available_ram as f64 / (1024.0 * 1024.0 * 1024.0));
-        eprintln!("║   Swap: {:.1} GB",
-            self.memory.swap_total_kb as f64 / (1024.0 * 1024.0));
+            self.available_ram as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+        eprintln!(
+            "║   Swap: {:.1} GB",
+            self.memory.swap_total_kb as f64 / (1024.0 * 1024.0)
+        );
 
         // GPUs
         if self.gpus.is_empty() {
@@ -443,23 +515,41 @@ impl HardwareProfile {
             for (i, gpu) in self.gpus.iter().enumerate() {
                 let pcie_info = self.pcie.iter().find(|p| p.gpu_index == gpu.index);
                 let pcie_str = pcie_info
-                    .map(|p| format!("PCIe Gen{} x{} ({:.0} MB/s)", p.gen, p.width, p.bandwidth_mbs))
+                    .map(|p| {
+                        format!(
+                            "PCIe Gen{} x{} ({:.0} MB/s)",
+                            p.gen, p.width, p.bandwidth_mbs
+                        )
+                    })
                     .unwrap_or_else(|| "PCIe unknown".to_string());
-                eprintln!("║ GPU{i}: {} — {:.1} GB VRAM ({:.1} GB free)",
+                eprintln!(
+                    "║ GPU{i}: {} — {:.1} GB VRAM ({:.1} GB free)",
                     gpu.name,
                     gpu.total_vram as f64 / (1024.0 * 1024.0 * 1024.0),
-                    gpu.free_vram as f64 / (1024.0 * 1024.0 * 1024.0));
-                eprintln!("║   Compute: sm_{}.{}  {pcie_str}", gpu.compute_major, gpu.compute_minor);
+                    gpu.free_vram as f64 / (1024.0 * 1024.0 * 1024.0)
+                );
+                eprintln!(
+                    "║   Compute: sm_{}.{}  {pcie_str}",
+                    gpu.compute_major, gpu.compute_minor
+                );
             }
         }
         if self.has_igp {
-            eprintln!("║ IGP: {} (using system RAM)",
-                self.igp_name.as_deref().unwrap_or("detected"));
+            eprintln!(
+                "║ IGP: {} (using system RAM)",
+                self.igp_name.as_deref().unwrap_or("detected")
+            );
         }
 
         // Storage
         for s in &self.storage {
-            let kind = if s.rotational { "HDD" } else if s.transport == "nvme" { "NVMe" } else { "SSD" };
+            let kind = if s.rotational {
+                "HDD"
+            } else if s.transport == "nvme" {
+                "NVMe"
+            } else {
+                "SSD"
+            };
             eprintln!("║ Storage: {} ({kind}, {})", s.device, s.transport);
         }
 
@@ -532,8 +622,15 @@ impl ExecutionPlan {
     /// - Pack as many layers as possible onto GPUs, rest on CPU
     /// - MoE layers are large (256 experts) but only 8 active → CPU-friendly (mmap pages in)
     /// - Attention layers are smaller → best candidates for GPU
-    pub fn build(hw: &HardwareProfile, model_layers: usize, bytes_per_layer: u64,
-                 is_moe: bool, n_embd: usize, _n_kv_heads: usize, _head_dim: usize) -> Self {
+    pub fn build(
+        hw: &HardwareProfile,
+        model_layers: usize,
+        bytes_per_layer: u64,
+        is_moe: bool,
+        n_embd: usize,
+        _n_kv_heads: usize,
+        _head_dim: usize,
+    ) -> Self {
         let mut plan = Self {
             layers: Vec::with_capacity(model_layers),
             device_layer_count: HashMap::new(),
@@ -547,9 +644,11 @@ impl ExecutionPlan {
 
         // --- Compute per-GPU available VRAM ---
         let overhead_per_gpu = 512 * 1024 * 1024u64;
-        let mut gpu_budgets: Vec<(usize, u64)> = hw.gpus.iter().map(|g| {
-            (g.index, g.free_vram.saturating_sub(overhead_per_gpu))
-        }).collect();
+        let mut gpu_budgets: Vec<(usize, u64)> = hw
+            .gpus
+            .iter()
+            .map(|g| (g.index, g.free_vram.saturating_sub(overhead_per_gpu)))
+            .collect();
         // Sort by VRAM descending, then by PCIe bandwidth descending
         gpu_budgets.sort_by(|a, b| b.1.cmp(&a.1));
 
@@ -586,7 +685,11 @@ impl ExecutionPlan {
             }
 
             let kind = if is_moe {
-                if layer_idx % 2 == 0 { "SSM/Attention" } else { "MoE FFN" }
+                if layer_idx % 2 == 0 {
+                    "SSM/Attention"
+                } else {
+                    "MoE FFN"
+                }
             } else {
                 "Transformer"
             };
@@ -638,7 +741,8 @@ impl ExecutionPlan {
         };
         // LM head: n_embd × vocab_size (typically 248320)
         let ops_lm_head = n_embd as f64 * 248320.0 / 1e9;
-        let total_ops = model_layers as f64 * (ops_per_attn_layer + ops_per_moe_layer) + ops_lm_head;
+        let total_ops =
+            model_layers as f64 * (ops_per_attn_layer + ops_per_moe_layer) + ops_lm_head;
 
         // Apply efficiency factor: real throughput is ~60% of theoretical due to
         // cache misses, branch mispredicts, memory latency, and OS scheduling.
@@ -651,11 +755,14 @@ impl ExecutionPlan {
 
         // Also estimate memory-bandwidth-limited tok/s
         // Active weight bytes per token: attention + top-k experts (Q8_0 = ~1 byte/param)
-        let active_bytes_per_token = model_layers as f64 * (
-            4.0 * (n_embd as f64).powi(2) // attention projections
-            + if is_moe { 8.0 * 3.0 * n_embd as f64 * 512.0 } else { 0.0 } // experts
-        ) + n_embd as f64 * 248320.0; // LM head
-        // DDR4 bandwidth estimate: ~20 GB/s (dual channel), ~12 GB/s (single channel)
+        let active_bytes_per_token = model_layers as f64
+            * (
+                4.0 * (n_embd as f64).powi(2) // attention projections
+            + if is_moe { 8.0 * 3.0 * n_embd as f64 * 512.0 } else { 0.0 }
+                // experts
+            )
+            + n_embd as f64 * 248320.0; // LM head
+                                        // DDR4 bandwidth estimate: ~20 GB/s (dual channel), ~12 GB/s (single channel)
         let mem_bw_gbs = 20.0; // conservative estimate
         let bw_limited_tok_s = mem_bw_gbs * 1e9 / active_bytes_per_token;
         // Actual throughput is minimum of compute-limited and bandwidth-limited
@@ -663,7 +770,8 @@ impl ExecutionPlan {
 
         // --- Advisories ---
         if hw.gpus.is_empty() {
-            plan.advisories.push("No GPUs detected. Running CPU-only.".to_string());
+            plan.advisories
+                .push("No GPUs detected. Running CPU-only.".to_string());
         }
 
         for link in &hw.pcie {
@@ -671,7 +779,8 @@ impl ExecutionPlan {
                 plan.advisories.push(format!(
                     "GPU{}: PCIe Gen{} x{} ({:.0} MB/s) — SLOW. \
                      Weights must be persistent in VRAM (no per-token transfers).",
-                    link.gpu_index, link.gen, link.width, link.bandwidth_mbs));
+                    link.gpu_index, link.gen, link.width, link.bandwidth_mbs
+                ));
             }
         }
 
@@ -680,26 +789,30 @@ impl ExecutionPlan {
                 "CPU lacks AVX2 — using {} ({}× slower than AVX2+FMA). \
                  GPU offloading is especially important.",
                 hw.cpu.best_simd(),
-                (8.0 / hw.cpu.estimated_matvec_gops()).round() as u32));
+                (8.0 / hw.cpu.estimated_matvec_gops()).round() as u32
+            ));
         }
 
         if hw.has_igp {
             plan.advisories.push(format!(
                 "IGP ({}) is consuming system RAM for display framebuffer. \
                  Consider disabling in BIOS to free ~256-512 MB.",
-                hw.igp_name.as_deref().unwrap_or("Intel HD")));
+                hw.igp_name.as_deref().unwrap_or("Intel HD")
+            ));
         }
 
         let headroom_gb = hw.memory.commit_headroom_kb() as f64 / (1024.0 * 1024.0);
         if headroom_gb < 2.0 && hw.memory.overcommit_mode == 0 {
             plan.advisories.push(format!(
                 "Commit headroom only {headroom_gb:.1} GB. Risk of OOM. \
-                 Run: sudo sysctl -w vm.overcommit_memory=1"));
+                 Run: sudo sysctl -w vm.overcommit_memory=1"
+            ));
         }
 
         if hw.cpu.physical_cores <= 2 {
             plan.advisories.push(
-                "Only 2 CPU cores — limited parallelism. GPU offloading is critical.".to_string());
+                "Only 2 CPU cores — limited parallelism. GPU offloading is critical.".to_string(),
+            );
         }
 
         plan
@@ -717,14 +830,25 @@ impl ExecutionPlan {
         }
         if !self.gpu_vram_bytes.is_empty() {
             for (gpu_idx, bytes) in &self.gpu_vram_bytes {
-                eprintln!("║   GPU{gpu_idx} VRAM: {:.2} GB allocated",
-                    *bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+                eprintln!(
+                    "║   GPU{gpu_idx} VRAM: {:.2} GB allocated",
+                    *bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+                );
             }
         }
-        eprintln!("║ CPU working set: {:.2} GB estimated",
-            self.cpu_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+        eprintln!(
+            "║ CPU working set: {:.2} GB estimated",
+            self.cpu_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
         eprintln!("║ CPU threads: {}", self.cpu_threads);
-        eprintln!("║ TurboQuant KV: {}", if self.use_turboquant { "ENABLED" } else { "disabled" });
+        eprintln!(
+            "║ TurboQuant KV: {}",
+            if self.use_turboquant {
+                "ENABLED"
+            } else {
+                "disabled"
+            }
+        );
         eprintln!("║ Est. throughput: {:.2} tok/s", self.estimated_tok_s);
 
         // Layer map (condensed)
@@ -1046,7 +1170,8 @@ fn detect_amd_gpus() -> Vec<GpuDevice> {
             let stdout = String::from_utf8_lossy(&out.stdout);
             // Parse CSV output: device,GPU_ID,VRAM_Total,VRAM_Used
             let mut gpus = Vec::new();
-            for line in stdout.lines().skip(1) { // skip header
+            for line in stdout.lines().skip(1) {
+                // skip header
                 let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
                 if parts.len() >= 4 {
                     let index: usize = parts[0].parse().unwrap_or(gpus.len());
@@ -1090,7 +1215,11 @@ fn detect_ram() -> (u64, u64) {
         if let Ok(out) = Command::new("sysctl").arg("hw.memsize").output() {
             if out.status.success() {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                if let Some(val) = stdout.split(':').nth(1).and_then(|s| s.trim().parse::<u64>().ok()) {
+                if let Some(val) = stdout
+                    .split(':')
+                    .nth(1)
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                {
                     total = val;
                     available = total / 2; // conservative estimate for macOS
                 }

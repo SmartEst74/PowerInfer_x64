@@ -27,23 +27,23 @@ pub mod benchmark;
 #[cfg(feature = "cuda")]
 pub mod cuda;
 pub mod gguf;
+#[cfg(feature = "server")]
+pub mod metrics;
 pub mod model;
 pub mod moe;
 pub mod ops;
+#[cfg(feature = "predictor")]
+pub mod predictor;
 pub mod quant;
 pub mod runtime;
+#[cfg(feature = "server")]
+pub mod server;
 pub mod simd;
 pub mod ssm;
 pub mod sysinfo;
 pub mod tokenizer;
 pub mod turboquant;
 pub mod weights;
-#[cfg(feature = "predictor")]
-pub mod predictor;
-#[cfg(feature = "server")]
-pub mod metrics;
-#[cfg(feature = "server")]
-pub mod server;
 
 // Re-exports
 pub use gguf::GgufFile;

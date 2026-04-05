@@ -51,7 +51,10 @@ fn main() -> anyhow::Result<()> {
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let next_id_new = indexed[0].0 as u32;
         let text = ctx.tokenizer().decode(&[next_id_new]);
-        eprintln!("Step {step}: token={next_id_new} text={text:?} logit={:.4}", indexed[0].1);
+        eprintln!(
+            "Step {step}: token={next_id_new} text={text:?} logit={:.4}",
+            indexed[0].1
+        );
     }
 
     Ok(())

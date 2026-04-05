@@ -20,8 +20,11 @@ fn main() -> anyhow::Result<()> {
             let norms = ctx.ssm_state_norms();
             let total_norm: f32 = norms.iter().map(|(_, n)| n * n).sum::<f32>().sqrt();
             let max_layer = norms.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            eprintln!("After pos={i} ({:?}): total_ssm_norm={total_norm:.2} max_layer={:?}",
-                ctx.tokenizer().decode(&[tok]), max_layer);
+            eprintln!(
+                "After pos={i} ({:?}): total_ssm_norm={total_norm:.2} max_layer={:?}",
+                ctx.tokenizer().decode(&[tok]),
+                max_layer
+            );
         }
     }
 
@@ -38,7 +41,12 @@ fn main() -> anyhow::Result<()> {
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     eprintln!("\nPos 14 (first 'return'), top5:");
     for &(id, logit) in indexed.iter().take(5) {
-        eprintln!("  {:>6} {:.4} {:?}", id, logit, ctx.tokenizer().decode(&[id as u32]));
+        eprintln!(
+            "  {:>6} {:.4} {:?}",
+            id,
+            logit,
+            ctx.tokenizer().decode(&[id as u32])
+        );
     }
 
     // Continue processing to position 17
@@ -51,7 +59,12 @@ fn main() -> anyhow::Result<()> {
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     eprintln!("\nPos 18 (second 'return'), top5:");
     for &(id, logit) in indexed.iter().take(5) {
-        eprintln!("  {:>6} {:.4} {:?}", id, logit, ctx.tokenizer().decode(&[id as u32]));
+        eprintln!(
+            "  {:>6} {:.4} {:?}",
+            id,
+            logit,
+            ctx.tokenizer().decode(&[id as u32])
+        );
     }
 
     // Compare logit vectors

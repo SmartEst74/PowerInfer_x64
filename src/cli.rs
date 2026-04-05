@@ -181,7 +181,9 @@ fn main() -> anyhow::Result<()> {
             if cpu_only {
                 eprintln!("Mode: CPU-only (forced by --cpu-only)");
             } else if has_cuda_build && n_gpus > 0 {
-                eprintln!("Mode: CUDA GPU offload ({n_gpus} GPU(s) — hot layers on GPU, cold on CPU)");
+                eprintln!(
+                    "Mode: CUDA GPU offload ({n_gpus} GPU(s) — hot layers on GPU, cold on CPU)"
+                );
             } else if n_gpus > 0 && !has_cuda_build {
                 eprintln!("╔═══════════════════════════════════════════════════════════╗");
                 eprintln!("║  ⚠  {n_gpus} NVIDIA GPU(s) detected but CUDA not enabled!    ║");
@@ -224,16 +226,21 @@ fn main() -> anyhow::Result<()> {
                     };
                     let templated = apply_chat_template(line);
                     eprint!("AI> ");
-                    let (output, token_times) = ctx.generate_streaming(&templated, opts, |token_text| {
-                        eprint!("{token_text}");
-                    })?;
+                    let (output, token_times) =
+                        ctx.generate_streaming(&templated, opts, |token_text| {
+                            eprint!("{token_text}");
+                        })?;
                     let _ = output; // already printed via streaming
                     eprintln!();
                     if token_times.len() > 1 {
                         let decode_times = &token_times[1..];
                         let avg_s = decode_times.iter().sum::<f64>() / decode_times.len() as f64;
                         let tok_s = 1.0 / avg_s;
-                        eprintln!("[{tok_s:.2} tok/s, {} tokens, {:.0}ms avg]", decode_times.len(), avg_s * 1000.0);
+                        eprintln!(
+                            "[{tok_s:.2} tok/s, {} tokens, {:.0}ms avg]",
+                            decode_times.len(),
+                            avg_s * 1000.0
+                        );
                     }
                     eprintln!();
                 }
@@ -250,11 +257,12 @@ fn main() -> anyhow::Result<()> {
                     repetition_penalty,
                     ..powerinfer::GenerationOptions::default()
                 };
-                let (output, token_times) = ctx.generate_streaming(&user_prompt, opts, |token_text| {
-                    print!("{token_text}");
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                })?;
+                let (output, token_times) =
+                    ctx.generate_streaming(&user_prompt, opts, |token_text| {
+                        print!("{token_text}");
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                    })?;
                 let _ = output;
                 println!();
 
@@ -299,8 +307,11 @@ fn main() -> anyhow::Result<()> {
                 if let Some(hot_index_path) = hot_index {
                     let index = powerinfer::activation::HotNeuronIndex::load(hot_index_path)?;
                     let indexed_layers = index.layers.len();
-                    let indexed_units: usize =
-                        index.layers.iter().map(|layer| layer.hot_indices.len()).sum();
+                    let indexed_units: usize = index
+                        .layers
+                        .iter()
+                        .map(|layer| layer.hot_indices.len())
+                        .sum();
                     ctx.set_hot_index(index)?;
                     eprintln!(
                         "Loaded hot index: {} layers, {} tracked units ({})",

@@ -99,7 +99,10 @@ fn main() -> anyhow::Result<()> {
             let emb_max = emb_slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let emb_mean: f32 = emb_slice.iter().sum::<f32>() / n_embd as f32;
             eprintln!("  Token {token_id} embedding: min={emb_min:.4}, max={emb_max:.4}, mean={emb_mean:.4}");
-            eprintln!("  First 10 values: {:?}", &emb_slice[..10.min(emb_slice.len())]);
+            eprintln!(
+                "  First 10 values: {:?}",
+                &emb_slice[..10.min(emb_slice.len())]
+            );
         }
     }
 

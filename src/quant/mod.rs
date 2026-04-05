@@ -663,7 +663,16 @@ pub fn matvec_col_major_q8_0(y: &mut [f32], x: &[f32], raw: &[u8], n_in: usize, 
     // Parallelize large matvecs across available CPU cores.
     let n_threads = num_cpus::get().max(1);
     if n_threads > 1 && n_out >= 4096 {
-        matvec_q8_0_parallel(y, &x_q8, raw, n_in, n_out, blocks_per_col, bytes_per_col, n_threads);
+        matvec_q8_0_parallel(
+            y,
+            &x_q8,
+            raw,
+            n_in,
+            n_out,
+            blocks_per_col,
+            bytes_per_col,
+            n_threads,
+        );
         return;
     }
 
@@ -762,8 +771,13 @@ fn matvec_q8_0_parallel(
                     if is_x86_feature_detected!("sse4.1") {
                         unsafe {
                             matvec_q8_0_sse_range(
-                                y_chunk, x_q8, raw, start, count,
-                                blocks_per_col, bytes_per_col,
+                                y_chunk,
+                                x_q8,
+                                raw,
+                                start,
+                                count,
+                                blocks_per_col,
+                                bytes_per_col,
                             );
                         }
                         return;
@@ -820,8 +834,7 @@ unsafe fn matvec_q8_0_sse_range(
 
         for (b, xb) in x_q8.iter().enumerate().take(blocks_per_col) {
             let blk_off = col_off + b * 34;
-            let w_scale =
-                half::f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+            let w_scale = half::f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
             let w_ptr = raw.as_ptr().add(blk_off + 2);
             let x_qs = &xb.qs;
 
@@ -874,8 +887,7 @@ fn matvec_q8_0_scalar(
         let mut sumf = 0.0f32;
         for (b, xb) in x_q8.iter().enumerate().take(blocks_per_col) {
             let blk_off = col_off + b * 34;
-            let w_scale =
-                half::f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+            let w_scale = half::f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
             let mut sumi: i32 = 0;
             for i in 0..32 {
                 sumi += (raw[blk_off + 2 + i] as i8) as i32 * xb.qs[i] as i32;
@@ -995,11 +1007,11 @@ pub fn matvec_col_major_select(
                 let mut sumf = 0.0f32;
                 for (block_idx, xb) in x_q8.iter().enumerate().take(blocks_per_col) {
                     let blk_off = col_off + block_idx * 34;
-                    let w_scale =
-                        f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+                    let w_scale = f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
                     let mut sumi: i32 = 0;
                     for value_idx in 0..32 {
-                        sumi += (raw[blk_off + 2 + value_idx] as i8) as i32 * xb.qs[value_idx] as i32;
+                        sumi +=
+                            (raw[blk_off + 2 + value_idx] as i8) as i32 * xb.qs[value_idx] as i32;
                     }
                     sumf += sumi as f32 * (w_scale * xb.scale);
                 }
@@ -1096,8 +1108,7 @@ pub fn matvec_col_major_sparse_input(
                     let block_idx = row_idx / 32;
                     let value_idx = row_idx % 32;
                     let blk_off = col_off + block_idx * 34;
-                    let scale =
-                        f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
+                    let scale = f16::from_le_bytes([raw[blk_off], raw[blk_off + 1]]).to_f32();
                     let weight = (raw[blk_off + 2 + value_idx] as i8) as f32 * scale;
                     sum += xv * weight;
                 }
@@ -1226,15 +1237,7 @@ pub fn ffn_swiglu_q_selected(
         n_ff,
         selected_indices,
     )?;
-    matvec_col_major_select(
-        &mut up,
-        x,
-        up_raw,
-        qtype,
-        n_embd,
-        n_ff,
-        selected_indices,
-    )?;
+    matvec_col_major_select(&mut up, x, up_raw, qtype, n_embd, n_ff, selected_indices)?;
 
     for i in 0..selected_indices.len() {
         let sig = 1.0 / (1.0 + (-gate[i]).exp());
@@ -1250,7 +1253,10 @@ mod tests {
     use super::*;
 
     fn pack_f32(values: &[f32]) -> Vec<u8> {
-        values.iter().flat_map(|value| value.to_le_bytes()).collect()
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
     }
 
     #[test]
@@ -1300,10 +1306,7 @@ mod tests {
         let n_in = 3;
         let n_out = 4;
         let raw = pack_f32(&[
-            1.0, 2.0, 3.0,
-            4.0, 5.0, 6.0,
-            7.0, 8.0, 9.0,
-            10.0, 11.0, 12.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ]);
         let x = [0.5f32, -1.0, 2.0];
 
@@ -1332,9 +1335,7 @@ mod tests {
         let n_in = 4;
         let n_out = 3;
         let raw = pack_f32(&[
-            1.0, 2.0, 3.0, 4.0,
-            5.0, 6.0, 7.0, 8.0,
-            9.0, 10.0, 11.0, 12.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ]);
         let indices = [1usize, 3usize];
         let sparse_x = [2.0f32, -1.0];
@@ -1374,22 +1375,9 @@ mod tests {
     fn test_ffn_swiglu_q_selected_f32() {
         let n_embd = 2;
         let n_ff = 4;
-        let gate_raw = pack_f32(&[
-            0.5, -0.1,
-            1.0, 0.25,
-            -0.5, 0.75,
-            0.2, 0.4,
-        ]);
-        let up_raw = pack_f32(&[
-            1.0, 0.5,
-            -0.25, 0.75,
-            0.6, -0.3,
-            0.9, 0.1,
-        ]);
-        let down_raw = pack_f32(&[
-            0.1, 0.2, 0.3, 0.4,
-            -0.5, 0.25, 0.15, 0.35,
-        ]);
+        let gate_raw = pack_f32(&[0.5, -0.1, 1.0, 0.25, -0.5, 0.75, 0.2, 0.4]);
+        let up_raw = pack_f32(&[1.0, 0.5, -0.25, 0.75, 0.6, -0.3, 0.9, 0.1]);
+        let down_raw = pack_f32(&[0.1, 0.2, 0.3, 0.4, -0.5, 0.25, 0.15, 0.35]);
         let x = [0.3f32, -0.7];
         let indices = [1usize, 3usize];
 
@@ -1409,7 +1397,15 @@ mod tests {
 
         let mut gate = vec![0.0f32; n_ff];
         let mut up = vec![0.0f32; n_ff];
-        matvec_col_major(&mut gate, &x, &gate_raw, QuantizationType::F32, n_embd, n_ff).unwrap();
+        matvec_col_major(
+            &mut gate,
+            &x,
+            &gate_raw,
+            QuantizationType::F32,
+            n_embd,
+            n_ff,
+        )
+        .unwrap();
         matvec_col_major(&mut up, &x, &up_raw, QuantizationType::F32, n_embd, n_ff).unwrap();
 
         for idx in 0..n_ff {

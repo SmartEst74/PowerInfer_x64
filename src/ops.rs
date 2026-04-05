@@ -91,7 +91,11 @@ pub fn compute_imrope_freqs(base_freq: f32, n_rot: usize, sections: &[i32; 4]) -
     let mut theta_e: f32 = 1.0;
 
     for pair in 0..n_pairs {
-        let sector = if sect_dims > 0 { pair % sect_dims } else { pair };
+        let sector = if sect_dims > 0 {
+            pair % sect_dims
+        } else {
+            pair
+        };
 
         // IMRoPE interleaved assignment: [t, h, w, t, h, w, ...]
         let theta = if sector % 3 == 0 && sector < 3 * sections[0] as usize {

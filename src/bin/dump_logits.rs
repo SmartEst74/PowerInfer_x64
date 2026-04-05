@@ -10,23 +10,25 @@ fn main() -> anyhow::Result<()> {
 
     // Run a single token through our forward pass
     let logits = ctx.forward(&[760])?;
-    
+
     let n_vocab = logits.len();
     println!("n_vocab={n_vocab}");
-    
+
     println!("LOGITS_START");
     for (i, logit) in logits.iter().enumerate() {
         println!("{i} {logit:.6}");
     }
-    
-    let test_indices: Vec<usize> = vec![727, 4211, 73111, 164042, 1000, 5000, 10000, 50000, 100000, 200000];
+
+    let test_indices: Vec<usize> = vec![
+        727, 4211, 73111, 164042, 1000, 5000, 10000, 50000, 100000, 200000,
+    ];
     println!("SPOT_START");
     for &idx in &test_indices {
         if idx < n_vocab {
             println!("{idx} {:.6}", logits[idx]);
         }
     }
-    
+
     // Top 10
     println!("TOP10_START");
     let mut indexed: Vec<(usize, f32)> = logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
@@ -34,6 +36,6 @@ fn main() -> anyhow::Result<()> {
     for (idx, val) in indexed.iter().take(10) {
         println!("{idx} {val:.6}");
     }
-    
+
     Ok(())
 }

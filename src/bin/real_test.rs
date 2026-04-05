@@ -164,7 +164,10 @@ fn run_smoke_prompt(ctx: &mut InferenceContext) -> anyhow::Result<()> {
     let start = Instant::now();
     // Run just the forward pass once to inspect logits
     let input_ids = ctx.tokenizer().encode(prompt);
-    eprintln!("  Token IDs for prompt: {:?}", &input_ids[..input_ids.len().min(10)]);
+    eprintln!(
+        "  Token IDs for prompt: {:?}",
+        &input_ids[..input_ids.len().min(10)]
+    );
     eprintln!("  EOS token ID: {:?}", ctx.tokenizer().eos_token_id());
 
     let n_gen = 10;
@@ -180,11 +183,18 @@ fn run_smoke_prompt(ctx: &mut InferenceContext) -> anyhow::Result<()> {
                 println!("  Prefill: {prefill_ms:.1}ms");
                 if token_times.len() > 1 {
                     let decode_times: Vec<f64> = token_times[1..].to_vec();
-                    let avg_ms = decode_times.iter().sum::<f64>() / decode_times.len() as f64 * 1000.0;
-                    let tok_s = 1.0 / (decode_times.iter().sum::<f64>() / decode_times.len() as f64);
+                    let avg_ms =
+                        decode_times.iter().sum::<f64>() / decode_times.len() as f64 * 1000.0;
+                    let tok_s =
+                        1.0 / (decode_times.iter().sum::<f64>() / decode_times.len() as f64);
                     println!("  Decode: {:.1}ms avg ({tok_s:.2} tok/s)", avg_ms);
                     for (i, &t) in decode_times.iter().enumerate() {
-                        println!("    token {}: {:.1}ms ({:.2} tok/s)", i + 1, t * 1000.0, 1.0 / t);
+                        println!(
+                            "    token {}: {:.1}ms ({:.2} tok/s)",
+                            i + 1,
+                            t * 1000.0,
+                            1.0 / t
+                        );
                     }
                 }
             }
@@ -273,9 +283,15 @@ fn run_sort_benchmark(ctx: &mut InferenceContext) -> anyhow::Result<()> {
     if !compile.status.success() {
         println!("  Harness compile: FAILED");
         if !compile.stderr.is_empty() {
-            println!("  rustc stderr:\n{}", String::from_utf8_lossy(&compile.stderr));
+            println!(
+                "  rustc stderr:\n{}",
+                String::from_utf8_lossy(&compile.stderr)
+            );
         }
-        anyhow::bail!("generated Rust did not compile; harness saved at {}", harness_path.display());
+        anyhow::bail!(
+            "generated Rust did not compile; harness saved at {}",
+            harness_path.display()
+        );
     }
 
     println!("  Harness compile: ok");
@@ -288,7 +304,10 @@ fn run_sort_benchmark(ctx: &mut InferenceContext) -> anyhow::Result<()> {
         if !run.stderr.is_empty() {
             println!("  stderr:\n{}", String::from_utf8_lossy(&run.stderr));
         }
-        anyhow::bail!("generated sorter failed correctness harness; harness saved at {}", harness_path.display());
+        anyhow::bail!(
+            "generated sorter failed correctness harness; harness saved at {}",
+            harness_path.display()
+        );
     }
 
     let stdout = String::from_utf8_lossy(&run.stdout);
@@ -304,7 +323,10 @@ fn run_sort_benchmark(ctx: &mut InferenceContext) -> anyhow::Result<()> {
         0.0
     };
 
-    println!("  Harness correctness: pass ({} cases)", report.cases_tested);
+    println!(
+        "  Harness correctness: pass ({} cases)",
+        report.cases_tested
+    );
     println!("  Generated sorter: {:.4}s", report.generated_s);
     println!("  std::sort_unstable baseline: {:.4}s", report.std_s);
     println!("  counting-sort baseline: {:.4}s", report.counting_s);
@@ -506,9 +528,12 @@ fn parse_harness_report(stdout: &str) -> anyhow::Result<HarnessReport> {
     }
 
     Ok(HarnessReport {
-        cases_tested: cases_tested.ok_or_else(|| anyhow::anyhow!("missing cases_tested in harness output"))?,
-        generated_s: generated_s.ok_or_else(|| anyhow::anyhow!("missing generated_s in harness output"))?,
+        cases_tested: cases_tested
+            .ok_or_else(|| anyhow::anyhow!("missing cases_tested in harness output"))?,
+        generated_s: generated_s
+            .ok_or_else(|| anyhow::anyhow!("missing generated_s in harness output"))?,
         std_s: std_s.ok_or_else(|| anyhow::anyhow!("missing std_s in harness output"))?,
-        counting_s: counting_s.ok_or_else(|| anyhow::anyhow!("missing counting_s in harness output"))?,
+        counting_s: counting_s
+            .ok_or_else(|| anyhow::anyhow!("missing counting_s in harness output"))?,
     })
 }

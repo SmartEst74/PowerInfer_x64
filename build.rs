@@ -65,7 +65,7 @@ fn main() {
     // Create embedded_kernels.rs stub
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let embed_file = out_dir.join("embedded_kernels.rs");
-    
+
     fs::write(
         &embed_file,
         "// Kernel embedding placeholder\n// Build with CUDA/Vulkan features to embed actual kernels\n",

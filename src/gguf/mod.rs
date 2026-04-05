@@ -183,10 +183,25 @@ impl GgufFile {
     pub fn ssm_config(&self) -> Option<SsmConfig> {
         let inner_size = self.get_config("ssm.inner_size").and_then(|v| v.as_u64())? as usize;
         let state_size = self.get_config("ssm.state_size").and_then(|v| v.as_u64())? as usize;
-        let conv_kernel = self.get_config("ssm.conv_kernel").and_then(|v| v.as_u64()).unwrap_or(4) as usize;
-        let time_step_rank = self.get_config("ssm.time_step_rank").and_then(|v| v.as_u64()).unwrap_or(32) as usize;
-        let group_count = self.get_config("ssm.group_count").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-        Some(SsmConfig { inner_size, state_size, conv_kernel, time_step_rank, group_count })
+        let conv_kernel = self
+            .get_config("ssm.conv_kernel")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(4) as usize;
+        let time_step_rank = self
+            .get_config("ssm.time_step_rank")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(32) as usize;
+        let group_count = self
+            .get_config("ssm.group_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as usize;
+        Some(SsmConfig {
+            inner_size,
+            state_size,
+            conv_kernel,
+            time_step_rank,
+            group_count,
+        })
     }
 
     /// Get full attention interval (if present; controls which layers use full vs linear attention)
@@ -218,7 +233,8 @@ impl GgufFile {
         let n_heads = self.attention_head_count()?;
         let n_embd = self.embedding_length()?;
         // Prefer explicit key_length (e.g. qwen35moe), else derive from embedding/heads
-        let head_dim = self.attention_key_length()
+        let head_dim = self
+            .attention_key_length()
             .unwrap_or_else(|| n_embd / n_heads);
         Ok(ModelConfig {
             arch: self.architecture()?.to_string(),

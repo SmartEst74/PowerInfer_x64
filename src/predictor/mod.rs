@@ -10,10 +10,10 @@ use std::path::Path;
 /// Configuration for the predictor network
 #[derive(Debug, Clone)]
 pub struct PredictorConfig {
-    pub input_dim: usize,      // top-k activations (e.g., 256)
-    pub hidden_dim: usize,     // e.g., 512
-    pub output_dim: usize,     // neuron blocks (e.g., 128 blocks × 64 neurons = 8192)
-    pub n_layers: usize,       // 2
+    pub input_dim: usize,  // top-k activations (e.g., 256)
+    pub hidden_dim: usize, // e.g., 512
+    pub output_dim: usize, // neuron blocks (e.g., 128 blocks × 64 neurons = 8192)
+    pub n_layers: usize,   // 2
 }
 
 /// The predictor model: MLP with ReLU activations
@@ -34,50 +34,60 @@ impl Predictor {
         let config = PredictorConfig {
             input_dim: 256,
             hidden_dim: 512,
-            output_dim: 128,  // 128 blocks
+            output_dim: 128, // 128 blocks
             n_layers: 2,
         };
-        
+
         // Placeholder: these would be actual trained weights
         let weights1 = Array2::zeros((config.hidden_dim, config.input_dim));
         let bias1 = Array1::zeros(config.hidden_dim);
         let weights2 = Array2::zeros((config.output_dim, config.hidden_dim));
         let bias2 = Array1::zeros(config.output_dim);
-        
-        Self { config, weights1, bias1, weights2, bias2 }
+
+        Self {
+            config,
+            weights1,
+            bias1,
+            weights2,
+            bias2,
+        }
     }
 
     /// Run forward pass: predict hot blocks from activations
-    /// 
+    ///
     /// # Arguments
     /// - `activations`: top-k activation values from previous layer (normalized)
-    /// 
+    ///
     /// # Returns
     /// Binary probability vector over blocks (sigmoid)
     pub fn predict(&self, activations: &[f32]) -> Array1<f32> {
         if activations.len() != self.config.input_dim {
-            eprintln!("Warning: predictor input dim mismatch, expected {}, got {}", 
-                self.config.input_dim, activations.len());
+            eprintln!(
+                "Warning: predictor input dim mismatch, expected {}, got {}",
+                self.config.input_dim,
+                activations.len()
+            );
             return Array1::zeros(self.config.output_dim);
         }
-        
+
         let x = Array1::from_vec(activations.to_vec());
-        
+
         // Layer 1: x @ W1.T + b1, then ReLU
         let mut h = self.weights1.dot(&x) + &self.bias1;
         h.map_inplace(|v| *v = v.max(0.0));
-        
+
         // Layer 2: h @ W2.T + b2, then sigmoid
         let mut logits = self.weights2.dot(&h) + &self.bias2;
         logits.map_inplace(|v| *v = 1.0 / (1.0 + (-*v).exp()));
-        
+
         logits
     }
 
     /// Get thresholded prediction at given confidence level
     pub fn predict_hot(&self, activations: &[f32], threshold: f32) -> Vec<usize> {
         let probs = self.predict(activations);
-        probs.iter()
+        probs
+            .iter()
             .enumerate()
             .filter(|(_, p)| **p >= threshold)
             .map(|(i, _)| i)
@@ -89,18 +99,18 @@ impl Predictor {
 pub mod train {
     use super::*;
     use rand::seq::SliceRandom;
-    
+
     /// Training dataset
     pub struct PredictorDataset {
         pub samples: Vec<(Array1<f32>, Vec<usize>)>, // (activations, hot_blocks)
     }
-    
+
     /// Train predictor from profiler data
-    /// 
+    ///
     /// # Arguments
     /// - `profiler_output`: JSONL of NeuronStats from `powerinfer-profile`
     /// - `block_size`: Number of neurons per block (e.g., 64)
-    /// 
+    ///
     /// # Returns
     /// Trained Predictor
     pub fn train_from_profiler<P: AsRef<Path>>(
@@ -114,7 +124,7 @@ pub mod train {
         // 3. Train MLP with binary cross-entropy loss
         // 4. Validate on held-out set
         // 5. Serialize weights
-        
+
         // Placeholder - full implementation in later phase
         Ok(Predictor::from_embedded())
     }
@@ -123,7 +133,7 @@ pub mod train {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_predictor_forward() {
         let pred = Predictor::from_embedded();
@@ -133,7 +143,7 @@ mod tests {
         // All probs should be in [0,1]
         assert!(probs.iter().all(|p| (0.0..=1.0).contains(p)));
     }
-    
+
     #[test]
     fn test_predict_hot() {
         let pred = Predictor::from_embedded();

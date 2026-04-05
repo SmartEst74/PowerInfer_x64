@@ -4,18 +4,20 @@
 //! using Axum and Tokio.
 
 use axum::{
-    routing::{post, get},
-    Router, Json, extract::State, http::StatusCode,
+    extract::State,
+    http::StatusCode,
     response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use crate::{GenerationOptions, InferenceContext};
 use crate::metrics::{Metrics, SharedMetrics};
+use crate::{GenerationOptions, InferenceContext};
 
 /// Application state shared across requests
 #[derive(Clone)]
@@ -143,7 +145,9 @@ fn validate_generation_options(
     top_p: Option<f32>,
 ) -> Result<(), ApiError> {
     if stream.unwrap_or(false) {
-        return Err(ApiError::bad_request("streaming responses are not implemented"));
+        return Err(ApiError::bad_request(
+            "streaming responses are not implemented",
+        ));
     }
 
     if let Some(temperature) = temperature {
@@ -257,28 +261,33 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/models", get(handle_list_models))
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(state)
 }
 
 /// Start the HTTP server
 pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
     info!("Loading model from: {}", config.model_path);
-    let mut ctx = InferenceContext::from_gguf(
-        &config.model_path,
-        crate::runtime::BackendFactory::cpu(),
-    )?;
+    let mut ctx =
+        InferenceContext::from_gguf(&config.model_path, crate::runtime::BackendFactory::cpu())?;
 
     if let Some(hot_index_path) = &config.hot_index_path {
         let index = crate::activation::HotNeuronIndex::load(hot_index_path)?;
         let indexed_layers = index.layers.len();
-        let indexed_units: usize = index.layers.iter().map(|layer| layer.hot_indices.len()).sum();
+        let indexed_units: usize = index
+            .layers
+            .iter()
+            .map(|layer| layer.hot_indices.len())
+            .sum();
         ctx.set_hot_index(index)?;
         info!(
             "Loaded hot index from {} ({} layers, {} tracked units)",
-            hot_index_path,
-            indexed_layers,
-            indexed_units
+            hot_index_path, indexed_layers, indexed_units
         );
     }
 
@@ -289,12 +298,19 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
     );
 
     let metrics = Arc::new(Metrics::new());
-    let model_name = ctx.config().name.clone().unwrap_or_else(|| "unknown".to_string());
-    metrics.model_info.with_label_values(&[
-        &model_name,
-        &ctx.config().arch,
-        &format!("{:?}", ctx.config().quantization),
-    ]).set(1);
+    let model_name = ctx
+        .config()
+        .name
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    metrics
+        .model_info
+        .with_label_values(&[
+            &model_name,
+            &ctx.config().arch,
+            &format!("{:?}", ctx.config().quantization),
+        ])
+        .set(1);
 
     let ctx = Arc::new(Mutex::new(ctx));
     let max_concurrent = if config.max_concurrent == 0 {
@@ -329,7 +345,9 @@ async fn handle_completions(
 ) -> Result<Json<CompletionResponse>, ApiError> {
     validate_generation_options(req.stream, req.temperature, req.top_p)?;
 
-    let timer = state.metrics.inference_duration_seconds
+    let timer = state
+        .metrics
+        .inference_duration_seconds
         .with_label_values(&["completions"])
         .start_timer();
 
@@ -347,13 +365,20 @@ async fn handle_completions(
 
     let resp = make_completion_response(req.model, text);
 
-    let tokens = resp.choices.first().map_or(0, |c| c.text.split_whitespace().count());
-    state.metrics.tokens_generated_total
+    let tokens = resp
+        .choices
+        .first()
+        .map_or(0, |c| c.text.split_whitespace().count());
+    state
+        .metrics
+        .tokens_generated_total
         .with_label_values(&[&resp.model])
         .inc_by(tokens as u64);
 
     timer.observe_duration();
-    state.metrics.inference_requests_total
+    state
+        .metrics
+        .inference_requests_total
         .with_label_values(&["completions", "200"])
         .inc();
 
@@ -367,7 +392,9 @@ async fn handle_chat_completions(
 ) -> Result<Json<ChatCompletionResponse>, ApiError> {
     validate_generation_options(req.stream, req.temperature, req.top_p)?;
 
-    let timer = state.metrics.inference_duration_seconds
+    let timer = state
+        .metrics
+        .inference_duration_seconds
         .with_label_values(&["chat"])
         .start_timer();
 
@@ -390,12 +417,16 @@ async fn handle_chat_completions(
         .choices
         .first()
         .map_or(0, |c| c.message.content.split_whitespace().count());
-    state.metrics.tokens_generated_total
+    state
+        .metrics
+        .tokens_generated_total
         .with_label_values(&[&resp.model])
         .inc_by(tokens as u64);
 
     timer.observe_duration();
-    state.metrics.inference_requests_total
+    state
+        .metrics
+        .inference_requests_total
         .with_label_values(&["chat", "200"])
         .inc();
 
@@ -403,9 +434,7 @@ async fn handle_chat_completions(
 }
 
 /// Handle /v1/models
-async fn handle_list_models(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+async fn handle_list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
     let model = state.model.try_lock();
     let model_id = model
         .ok()

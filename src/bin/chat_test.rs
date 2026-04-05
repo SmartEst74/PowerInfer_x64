@@ -47,7 +47,13 @@ fn main() -> anyhow::Result<()> {
         let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let top_text = ctx.tokenizer().decode(&[indexed[0].0 as u32]);
-        eprintln!("  pos={}: input={:?} top={:?}({:.2})", 15+i, ctx.tokenizer().decode(&[tok]), top_text, indexed[0].1);
+        eprintln!(
+            "  pos={}: input={:?} top={:?}({:.2})",
+            15 + i,
+            ctx.tokenizer().decode(&[tok]),
+            top_text,
+            indexed[0].1
+        );
     }
 
     Ok(())

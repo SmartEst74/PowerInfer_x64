@@ -182,8 +182,7 @@ impl Tokenizer {
             .metadata("tokenizer.ggml.model")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let uses_byte_level = model_type == "gpt2"
-            || token_to_id.contains_key("\u{0120}");
+        let uses_byte_level = model_type == "gpt2" || token_to_id.contains_key("\u{0120}");
 
         let byte_to_char = gpt2_byte_to_unicode();
         let char_to_byte = gpt2_unicode_to_byte();
@@ -224,22 +223,28 @@ impl Tokenizer {
         // doesn't support. We use \s+ and post-process to simulate the effect:
         // trim the last char from pure-whitespace matches preceding non-whitespace.
         let pre_regex = match pre_type {
-            PreTokenizerType::Qwen35 => Some(Regex::new(concat!(
-                r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])",
-                r"|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+",
-                r"|\p{N}",
-                r"| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*",
-                r"|\s*[\r\n]+",
-                r"|\s+",
-            )).expect("invalid qwen35 pretokenizer regex")),
-            PreTokenizerType::Qwen2 | PreTokenizerType::Gpt2 => Some(Regex::new(concat!(
-                r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])",
-                r"|[^\r\n\p{L}\p{N}]?\p{L}+",
-                r"|\p{N}",
-                r"| ?[^\s\p{L}\p{N}]+[\r\n]*",
-                r"|\s*[\r\n]+",
-                r"|\s+",
-            )).expect("invalid gpt2/qwen2 pretokenizer regex")),
+            PreTokenizerType::Qwen35 => Some(
+                Regex::new(concat!(
+                    r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])",
+                    r"|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+",
+                    r"|\p{N}",
+                    r"| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*",
+                    r"|\s*[\r\n]+",
+                    r"|\s+",
+                ))
+                .expect("invalid qwen35 pretokenizer regex"),
+            ),
+            PreTokenizerType::Qwen2 | PreTokenizerType::Gpt2 => Some(
+                Regex::new(concat!(
+                    r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])",
+                    r"|[^\r\n\p{L}\p{N}]?\p{L}+",
+                    r"|\p{N}",
+                    r"| ?[^\s\p{L}\p{N}]+[\r\n]*",
+                    r"|\s*[\r\n]+",
+                    r"|\s+",
+                ))
+                .expect("invalid gpt2/qwen2 pretokenizer regex"),
+            ),
             PreTokenizerType::None => None,
         };
 
@@ -510,9 +515,8 @@ impl Tokenizer {
                     }
                 }
             }
-            String::from_utf8(bytes).unwrap_or_else(|e| {
-                String::from_utf8_lossy(e.as_bytes()).into_owned()
-            })
+            String::from_utf8(bytes)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
         } else {
             // Legacy SentencePiece path
             let mut s = String::new();

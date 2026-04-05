@@ -192,16 +192,16 @@ EXIT:
         /// Create a persistent GPU context on the given device.
         pub fn new(device_id: u32) -> Result<Self, String> {
             ensure_init()?;
-            let device = Device::get_device(device_id)
-                .map_err(|e| format!("Device {device_id}: {e}"))?;
-            let ctx = Context::new(device)
-                .map_err(|e| format!("Context for device {device_id}: {e}"))?;
-            let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-                .map_err(|e| format!("Stream: {e}"))?;
+            let device =
+                Device::get_device(device_id).map_err(|e| format!("Device {device_id}: {e}"))?;
+            let ctx =
+                Context::new(device).map_err(|e| format!("Context for device {device_id}: {e}"))?;
+            let stream =
+                Stream::new(StreamFlags::NON_BLOCKING, None).map_err(|e| format!("Stream: {e}"))?;
 
             // Compile PTX once and leak the module so the function pointer is 'static.
-            let module = Module::from_ptx(MATVEC_PTX, &[])
-                .map_err(|e| format!("PTX compile: {e}"))?;
+            let module =
+                Module::from_ptx(MATVEC_PTX, &[]).map_err(|e| format!("PTX compile: {e}"))?;
             let module: &'static Module = Box::leak(Box::new(module));
             let matvec_func = module
                 .get_function("matvec_kernel")
@@ -227,11 +227,9 @@ EXIT:
         /// until dropped.
         pub fn upload_f32(&self, data: &[f32]) -> Result<GpuBuffer, String> {
             self.make_current()?;
-            let bytes = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-            };
-            let inner = DeviceBuffer::from_slice(bytes)
-                .map_err(|e| format!("upload_f32: {e}"))?;
+            let bytes =
+                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
+            let inner = DeviceBuffer::from_slice(bytes).map_err(|e| format!("upload_f32: {e}"))?;
             Ok(GpuBuffer {
                 inner,
                 len: data.len(),
@@ -280,9 +278,7 @@ EXIT:
             let (_, d_x, _, d_y) = scratch.as_mut().unwrap();
 
             // Upload x: use raw CUDA memcpy (avoids alloc/free, just copies into existing buffer)
-            let x_slice = unsafe {
-                std::slice::from_raw_parts(x.as_ptr() as *const u8, n_in * 4)
-            };
+            let x_slice = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const u8, n_in * 4) };
             // Upload x: use raw CUDA memcpy (avoids alloc/free, just copies into existing buffer)
             unsafe {
                 let res = cust::sys::cuMemcpyHtoD_v2(
@@ -313,12 +309,13 @@ EXIT:
                 .map_err(|e| format!("launch: {e}"))?;
             }
 
-            self.stream.synchronize().map_err(|e| format!("sync: {e}"))?;
+            self.stream
+                .synchronize()
+                .map_err(|e| format!("sync: {e}"))?;
 
             // Download y: raw CUDA memcpy from device to host
-            let y_bytes = unsafe {
-                std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut u8, n_out * 4)
-            };
+            let y_bytes =
+                unsafe { std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut u8, n_out * 4) };
             unsafe {
                 let res = cust::sys::cuMemcpyDtoH_v2(
                     y_bytes.as_mut_ptr() as *mut std::ffi::c_void,
@@ -336,8 +333,8 @@ EXIT:
         pub fn memory_info(&self) -> Result<(usize, usize), String> {
             self.make_current()?;
             // cust memory_get_info returns (free, total)
-            let (free, total) = cust::memory::mem_get_info()
-                .map_err(|e| format!("mem_get_info: {e}"))?;
+            let (free, total) =
+                cust::memory::mem_get_info().map_err(|e| format!("mem_get_info: {e}"))?;
             Ok((free, total))
         }
     }
@@ -387,10 +384,7 @@ EXIT:
         /// `assignments` is a list of `(layer_idx, gpu_device_id)` pairs from the
         /// execution plan. `get_weight` is a callback that dequantizes the named
         /// weight tensor to f32 and returns `(data, n_rows, n_cols)`.
-        pub fn init<F>(
-            assignments: &[(usize, usize)],
-            mut get_weight: F,
-        ) -> Result<Self, String>
+        pub fn init<F>(assignments: &[(usize, usize)], mut get_weight: F) -> Result<Self, String>
         where
             F: FnMut(usize, &str) -> Option<(Vec<f32>, usize, usize)>,
         {
@@ -419,8 +413,13 @@ EXIT:
             // SSM/GDR layers have attn_qkv + attn_gate + ssm_out.
             // Full attention layers have attn_q + attn_k + attn_v + attn_output.
             let weight_suffixes = [
-                "attn_qkv", "attn_gate", "ssm_out",
-                "attn_q", "attn_k", "attn_v", "attn_output",
+                "attn_qkv",
+                "attn_gate",
+                "ssm_out",
+                "attn_q",
+                "attn_k",
+                "attn_v",
+                "attn_output",
             ];
 
             for &(layer_idx, gpu_id) in assignments {
@@ -439,10 +438,13 @@ EXIT:
                 }
 
                 if !buffers.is_empty() {
-                    layers.insert(layer_idx, LayerGpuWeights {
-                        device_idx: dev_idx,
-                        buffers,
-                    });
+                    layers.insert(
+                        layer_idx,
+                        LayerGpuWeights {
+                            device_idx: dev_idx,
+                            buffers,
+                        },
+                    );
                 }
             }
 
@@ -450,14 +452,23 @@ EXIT:
             let total_buffers: usize = layers.values().map(|l| l.buffers.len()).sum();
             eprintln!("[GPU] Uploaded {total_buffers} weight tensors across {total_layers} layers");
 
-            Ok(Self { devices, layers, lm_head: None })
+            Ok(Self {
+                devices,
+                layers,
+                lm_head: None,
+            })
         }
 
         /// Upload the LM head weight matrix, splitting across all GPUs.
         ///
         /// `data` is row-major f32 of shape [n_out × n_in].
         /// Each GPU gets a contiguous slice of output rows.
-        pub fn upload_lm_head(&mut self, data: &[f32], n_out: usize, n_in: usize) -> Result<(), String> {
+        pub fn upload_lm_head(
+            &mut self,
+            data: &[f32],
+            n_out: usize,
+            n_in: usize,
+        ) -> Result<(), String> {
             let n_gpus = self.devices.len();
             if n_gpus == 0 {
                 return Ok(());
@@ -478,7 +489,13 @@ EXIT:
                     "[GPU] Uploaded LM head rows {row_start}..{row_end} ({n_rows}×{n_in}, {mb:.1} MB) → GPU {}",
                     dev.device_id
                 );
-                parts.push(LmHeadPart { device_idx: dev_idx, buffer, row_start, n_rows, n_in });
+                parts.push(LmHeadPart {
+                    device_idx: dev_idx,
+                    buffer,
+                    row_start,
+                    n_rows,
+                    n_in,
+                });
             }
             self.lm_head = Some(parts);
             Ok(())
@@ -555,4 +572,3 @@ EXIT:
         }
     }
 }
-

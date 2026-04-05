@@ -2,7 +2,8 @@ use powerinfer::model::InferenceContext;
 use powerinfer::runtime::BackendFactory;
 
 fn main() -> anyhow::Result<()> {
-    let model_path = std::env::args().nth(1)
+    let model_path = std::env::args()
+        .nth(1)
         .unwrap_or_else(|| "/home/jon/models/llama-cache/Qwen3.5-35B-A3B-Q8_0.gguf".to_string());
     std::env::set_var("POWERINFER_NO_CUDA", "1");
     let backend = BackendFactory::cpu();
