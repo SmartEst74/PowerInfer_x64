@@ -126,7 +126,7 @@ jobs:
           cat bench_results.json
 
       - name: Store benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
           path: bench_results.json
