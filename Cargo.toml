@@ -36,7 +36,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # Linear algebra (predictor training)
-ndarray = { version = "0.16", optional = true }
+ndarray = { version = "0.17", optional = true }
 rand = { version = "0.8", optional = true }
 
 # Regex (pretokenization for BPE tokenizers)
